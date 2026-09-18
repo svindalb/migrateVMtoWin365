@@ -54,7 +54,7 @@ pwsh -NoProfile -STA -File .\Start-CpcMigration.ps1 -TenantId "22222222-2222-222
 
 Replace the example GUID with the intended tenant. `-TenantId` validates before UI startup, prepopulates and locks the tenant field, and enforces that tenant in the engine for subscription detection, Azure/Graph connection and journal loading. Cached sessions in another organization cannot override it. It does **not** sign in automatically, switch subscriptions implicitly, grant access, or bypass consent/Conditional Access. Without the parameter, enter the tenant in the UI as before. Open a new instance to change a startup-locked tenant.
 
-Use your organization's normal script-signing/execution-policy process. The launcher does **not** bypass execution policy, request elevation, or automatically sign in. Windows PowerShell 5.1, Linux and macOS are not supported by this UI.
+Use your organization's normal script-signing/execution-policy process. The launcher does **not** bypass execution policy, request elevation, or automatically sign in. **Windows PowerShell 5.1, Linux and macOS are not supported by this UI**.
 
 ### Automatic log and recovery journal
 
