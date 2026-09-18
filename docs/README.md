@@ -72,11 +72,6 @@ Both paths are shown in the footer (hover for full text), startup activity, and 
 - [CpcMigration.Confirmation.psm1](CpcMigration.Confirmation.psm1): scrollable resource/action review and confirmation dialogs.
 - [CpcMigration.Workflow.psm1](CpcMigration.Workflow.psm1): read-only stage/button policy, next-step guidance and local resume-journal discovery.
 - [CpcMigration.Journals.psm1](CpcMigration.Journals.psm1) and [CpcMigration.Journals.xaml](CpcMigration.Journals.xaml): saved-plan manager and guarded local archive.
-- [project-status/SOURCES.md](project-status/SOURCES.md): developer research, exact API contracts and discrepancies; includes internal references.
-- [tests/Test-Offline.ps1](tests/Test-Offline.ps1): regression tests without cloud access.
-- [tests/Test-Recovery.ps1](tests/Test-Recovery.ps1): request contracts, transactional journals, tenant locks and interrupted-operation recovery, all offline.
-- [tests/Test-Workflow.ps1](tests/Test-Workflow.ps1): phase/action matrix, approval expiry, batch scope, resume discovery and guest timestamp display, all offline.
-- [tests/Test-Journals.ps1](tests/Test-Journals.ps1): journal inventory, active-plan locks, archive rollback/evidence preservation and rendered manager tests.
 
 ## Included functionality
 
