@@ -11,16 +11,16 @@ The tool guides an administrator through selecting a source VM and target user, 
 ## Where to start
 
 1. **[Installation and prerequisites](../README.md#start)** — PowerShell, required modules, startup and tenant selection. Review the root README's supported scope and permissions before connecting.
-2. **[Simple button reference](OPERATOR-GUIDE.md#simple-button-reference)** — what each button does and when to use it.
-3. **[Full operator guide](OPERATOR-GUIDE.md)** — every tab, input, selection rule, confirmation, stage and recovery action.
-4. **[Resume an existing migration](OPERATOR-GUIDE.md#resume-playbook)** — use the original journal rather than creating another draft.
-5. **[Saved journal management](OPERATOR-GUIDE.md#saved-migration-journals-dialog)** — locate completed/unfinished plans and safely archive eligible history.
+2. **[Simple button reference](docs/OPERATOR-GUIDE.md#simple-button-reference)** — what each button does and when to use it.
+3. **[Full operator guide](docs/OPERATOR-GUIDE.md)** — every tab, input, selection rule, confirmation, stage and recovery action.
+4. **[Resume an existing migration](docs/OPERATOR-GUIDE.md#resume-playbook)** — use the original journal rather than creating another draft.
+5. **[Saved journal management](docs/OPERATOR-GUIDE.md#saved-migration-journals-dialog)** — locate completed/unfinished plans and safely archive eligible history.
 
 ## Normal migration, briefly
 
 **Connect → map → assess and attest → validate and prepare → validate and capture → wait for Staged → validate and import → wait for Imported → validate and assign license → wait for Provisioned → test and accept → clean up staging when retention permits.**
 
-Use **Refresh status** while waiting. Every major stage needs its own validation approval. After the entire batch is eligible, **Use images** can return the group's setting to image-based future provisioning; confirm the result and allow propagation before changing membership. See the [exact completion order](OPERATOR-GUIDE.md#return-the-group-to-normal-image-provisioning-before-changing-membership).
+Use **Refresh status** while waiting. Every major stage needs its own validation approval. After the entire batch is eligible, **Use images** can return the group's setting to image-based future provisioning; confirm the result and allow propagation before changing membership. See the [exact completion order](docs/OPERATOR-GUIDE.md#return-the-group-to-normal-image-provisioning-before-changing-membership).
 
 ## Important safety rules
 
