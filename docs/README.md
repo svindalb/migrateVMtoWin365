@@ -1,6 +1,6 @@
 # Azure VM → Windows 365 Migration Workbench
 
-A standalone **PowerShell 7 / WPF** desktop application. Connects directly to Azure and Microsoft Graph. **No MCP server, web server, Azure Function, app-registration secret, or hosted component is required.**
+A standalone **PowerShell 7 / WPF** desktop application. Connects directly to Azure and Microsoft Graph. **No web server, Azure Function, app-registration secret, or hosted component is required.** Admin user with enough permissions to perform the tasks is needed. Tool is using interactive Authentication.
 
 > **Controlled-pilot implementation, not a Microsoft-supported migration product.** The migration APIs are documented under **Microsoft Graph beta**. Microsoft states that beta APIs can change and are not supported for production application use. Validate tenant access and run an approved, recoverable pilot before considering broader use.
 
