@@ -38,7 +38,7 @@ Use this README for installation, prerequisites, technical boundaries and tests;
 
 ## Start
 
-Keep the application files together. **Double-click [Launch-CpcMigration.cmd](Launch-CpcMigration.cmd)** to start in PowerShell 7 STA, or open PowerShell 7 and run:
+Keep the application files together. **Double-click [Launch-CpcMigration.cmd](../Launch-CpcMigration.cmd)** to start in PowerShell 7 STA, or open PowerShell 7 and run:
 
 ```powershell
 pwsh -NoProfile -STA -File .\Start-CpcMigration.ps1
@@ -66,12 +66,12 @@ Activity messages are flushed to the `.log` as they occur. Graph responses and t
 
 Both paths are shown in the footer (hover for full text), startup activity, and a copyable field in **Activity log**. **Save journal as...** optionally changes the active recovery-journal path; loading an existing journal switches to that journal. The session log stays at its startup location so the current run's history remains together. Logs can grow throughout a run; archive them according to your retention policy. Protect all generated files as sensitive tenant/user/resource data. Runtime logging failures are surfaced and do not silently redirect an in-progress migration.
 
-- [Start-CpcMigration.ps1](Start-CpcMigration.ps1): WPF launcher, dedicated background runspace and event handlers.
-- [CpcMigration.xaml](CpcMigration.xaml): desktop interface.
-- [CpcMigration.Core.psm1](CpcMigration.Core.psm1): migration engine and safety checks.
-- [CpcMigration.Confirmation.psm1](CpcMigration.Confirmation.psm1): scrollable resource/action review and confirmation dialogs.
-- [CpcMigration.Workflow.psm1](CpcMigration.Workflow.psm1): read-only stage/button policy, next-step guidance and local resume-journal discovery.
-- [CpcMigration.Journals.psm1](CpcMigration.Journals.psm1) and [CpcMigration.Journals.xaml](CpcMigration.Journals.xaml): saved-plan manager and guarded local archive.
+- [Start-CpcMigration.ps1](../Start-CpcMigration.ps1): WPF launcher, dedicated background runspace and event handlers.
+- [CpcMigration.xaml](../CpcMigration.xaml): desktop interface.
+- [CpcMigration.Core.psm1](../CpcMigration.Core.psm1): migration engine and safety checks.
+- [CpcMigration.Confirmation.psm1](../CpcMigration.Confirmation.psm1): scrollable resource/action review and confirmation dialogs.
+- [CpcMigration.Workflow.psm1](../CpcMigration.Workflow.psm1): read-only stage/button policy, next-step guidance and local resume-journal discovery.
+- [CpcMigration.Journals.psm1](../CpcMigration.Journals.psm1) and [CpcMigration.Journals.xaml](../CpcMigration.Journals.xaml): saved-plan manager and guarded local archive.
 
 ## Included functionality
 
