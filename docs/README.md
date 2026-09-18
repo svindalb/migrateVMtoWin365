@@ -94,7 +94,7 @@ No progress percentage is fabricated for Graph import/provisioning: those stages
 
 ## Supported scope and deliberate restrictions
 
-- **Windows 365 Enterprise, Commercial cloud, non-GPU** targets, with the requested **CloudPC Lite** license-selection exception described below.
+- **Windows 365 Enterprise, Commercial cloud, non-GPU** targets.
 - Azure **Gen2**, persistent **managed Windows OS disks**. Windows client, not Windows Server or multi-session.
 - Same tenant; this version also requires source and staging resources in **one selected subscription per batch**. Use another app instance/plan for another subscription.
 - Source Entra joined or hybrid joined to the same tenant. The guest assessment validates Entra tenant; hybrid domain readiness still needs operator review.
