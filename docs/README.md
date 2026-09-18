@@ -6,17 +6,17 @@ A standalone **PowerShell 7 / WPF** desktop application. Connects directly to Az
 
 ## Operator documentation
 
-**[Start with the simple button reference: what each button does and when to click it](docs/OPERATOR-GUIDE.md#simple-button-reference).** It covers every tab and dialog without requiring the technical implementation details.
+**[Start with the simple button reference: what each button does and when to click it](OPERATOR-GUIDE.md#simple-button-reference).** It covers every tab and dialog without requiring the technical implementation details.
 
-**[Complete operator guide — every tab, button, input and dialog](docs/OPERATOR-GUIDE.md)** is the UI reference. It includes required values/examples, read-only displays, action effects, stage/selection restrictions, confirmations, journal management, recovery inputs and a resume playbook.
+**[Complete operator guide — every tab, button, input and dialog](OPERATOR-GUIDE.md)** is the UI reference. It includes required values/examples, read-only displays, action effects, stage/selection restrictions, confirmations, journal management, recovery inputs and a resume playbook.
 
-- [Connect/configure and destination inputs](docs/OPERATOR-GUIDE.md#tab-1--connect--configure)
-- [VM/user mapping and group selection](docs/OPERATOR-GUIDE.md#tab-2--select--map)
-- [Migration buttons, polling, journal/report toolbar and evidence](docs/OPERATOR-GUIDE.md#tab-3--migration)
-- [Prerequisite results](docs/OPERATOR-GUIDE.md#tab-4--prerequisite-results)
-- [Dashboard, Graph and every recovery control](docs/OPERATOR-GUIDE.md#tab-5--dashboard--graph)
-- [Activity log](docs/OPERATOR-GUIDE.md#tab-6--activity-log), [saved journals](docs/OPERATOR-GUIDE.md#saved-migration-journals-dialog) and [confirmation/file dialogs](docs/OPERATOR-GUIDE.md#confirmation-result-and-file-dialogs)
-- [Phase dictionary](docs/OPERATOR-GUIDE.md#phase-dictionary-and-allowed-next-steps) and [resume playbook](docs/OPERATOR-GUIDE.md#resume-playbook)
+- [Connect/configure and destination inputs](OPERATOR-GUIDE.md#tab-1--connect--configure)
+- [VM/user mapping and group selection](OPERATOR-GUIDE.md#tab-2--select--map)
+- [Migration buttons, polling, journal/report toolbar and evidence](OPERATOR-GUIDE.md#tab-3--migration)
+- [Prerequisite results](OPERATOR-GUIDE.md#tab-4--prerequisite-results)
+- [Dashboard, Graph and every recovery control](OPERATOR-GUIDE.md#tab-5--dashboard--graph)
+- [Activity log](OPERATOR-GUIDE.md#tab-6--activity-log), [saved journals](OPERATOR-GUIDE.md#saved-migration-journals-dialog) and [confirmation/file dialogs](OPERATOR-GUIDE.md#confirmation-result-and-file-dialogs)
+- [Phase dictionary](OPERATOR-GUIDE.md#phase-dictionary-and-allowed-next-steps) and [resume playbook](OPERATOR-GUIDE.md#resume-playbook)
 
 Use this README for installation, prerequisites, technical boundaries and tests; use the guide while operating the UI. **Use-checkbox selection is distinct from highlighting; Repair and Use images affect the whole batch.**
 
