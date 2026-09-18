@@ -1,0 +1,165 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Windows 365 Migration Workbench" Width="1440" Height="960" MinWidth="1100" MinHeight="760"
+        WindowStartupLocation="CenterScreen" Background="#0B1220" Foreground="#E2E8F0" FontFamily="Segoe UI" FontSize="13">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#1E3A5F"/><Setter Property="Foreground" Value="White"/>
+            <Setter Property="Padding" Value="13,8"/><Setter Property="Margin" Value="0,0,7,7"/>
+            <Setter Property="BorderThickness" Value="0"/><Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
+            <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></Style.Triggers>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Padding" Value="8,6"/><Setter Property="Background" Value="#F8FAFC"/>
+            <Setter Property="Foreground" Value="#0F172A"/><Setter Property="BorderBrush" Value="#64748B"/>
+        </Style>
+        <Style TargetType="ComboBox"><Setter Property="Padding" Value="8,5"/><Setter Property="Foreground" Value="#0F172A"/></Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="#E2E8F0"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#F8FAFC"/><Setter Property="Foreground" Value="#0F172A"/>
+            <Setter Property="RowBackground" Value="White"/><Setter Property="AlternatingRowBackground" Value="#EFF6FF"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/><Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/><Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#E2E8F0"/><Setter Property="RowHeight" Value="32"/>
+            <Setter Property="HeadersVisibility" Value="Column"/><Setter Property="SelectionMode" Value="Extended"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader"><Setter Property="Background" Value="#DBEAFE"/><Setter Property="Padding" Value="9"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+        <Style TargetType="TabItem"><Setter Property="Padding" Value="16,9"/><Setter Property="Foreground" Value="#0F172A"/></Style>
+        <Style x:Key="FieldLabel" TargetType="TextBlock"><Setter Property="Margin" Value="0,12,0,5"/><Setter Property="Foreground" Value="#CBD5E1"/></Style>
+    </Window.Resources>
+    <Grid Margin="24">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,15">
+            <StackPanel DockPanel.Dock="Right" HorizontalAlignment="Right"><TextBlock Name="ConnectionText" Text="Not connected" Foreground="#38BDF8" Margin="0,0,0,8"/><Button Name="DocsButton" Content="Microsoft Learn ↗"/></StackPanel>
+            <StackPanel><TextBlock Text="WINDOWS 365" Foreground="#38BDF8" FontSize="12" FontWeight="Bold"/><TextBlock Text="Migration Workbench" FontSize="28" FontWeight="SemiBold"/><TextBlock Text="Azure VM → OS snapshot + VMGS → Graph import → license → Cloud PC" Foreground="#94A3B8" Margin="0,5,0,0"/></StackPanel>
+        </DockPanel>
+        <Border Grid.Row="1" Background="#332B18" CornerRadius="6" Padding="12" Margin="0,0,0,14"><TextBlock Text="CONTROLLED PILOT · Microsoft Graph beta APIs are subject to change. Commercial / Enterprise / Gen2 only. Source VMs are never deleted. Import success is not migration completion." Foreground="#FDE68A" TextWrapping="Wrap"/></Border>
+        <TabControl Name="Tabs" Grid.Row="2" Background="#101C30" BorderBrush="#334155">
+            <TabItem Header="1  Connect &amp; configure">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"><Grid Margin="20" TextElement.Foreground="#E2E8F0"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <StackPanel Name="SettingsPanel" Margin="0,0,28,0">
+                        <TextBlock Text="Tenant and migration destination" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock Text="Tenant ID (GUID)" Style="{StaticResource FieldLabel}"/><TextBox Name="TenantId"/>
+                        <Button Name="DetectSubscriptionsButton" Content="1  Sign in to Azure / detect subscriptions" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                        <TextBlock Text="2  Select Azure subscription (name and ID)" Style="{StaticResource FieldLabel}"/><ComboBox Name="SubscriptionPicker"/>
+                        <TextBlock Name="SubscriptionHint" Text="Enter the tenant ID, detect subscriptions, then select one. No subscription is selected automatically." Foreground="#BAE6FD" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                        <WrapPanel Margin="0,12,0,0"><Button Name="ConnectButton" Content="3  Connect selected subscription + Graph" Background="#0369A1"/><Button Name="DiscoverButton" Content="4  Discover VMs / resource groups"/></WrapPanel>
+                        <TextBlock Text="Existing Enterprise dedicated provisioning policy" Style="{StaticResource FieldLabel}"/><ComboBox Name="PolicyPicker"/>
+                        <TextBlock Text="Windows 365 Enterprise / CloudPC Lite — no Flex, Frontline or GPU" Style="{StaticResource FieldLabel}"/>
+                        <ComboBox Name="SkuPicker"><ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem"><Setter Property="IsEnabled" Value="{Binding CanSelect}"/></Style></ComboBox.ItemContainerStyle></ComboBox>
+                        <TextBlock Name="LicenseInfo" Text="Discover or refresh licenses to retrieve current seat counts." Foreground="#BAE6FD" TextWrapping="Wrap" Margin="0,7,0,7"/>
+                        <Button Name="RefreshLicensesButton" Content="Refresh available licenses" HorizontalAlignment="Left"/>
+                        <TextBlock Text="Target license disk capacity (GiB) — resolved from selected license" Style="{StaticResource FieldLabel}"/><TextBox Name="DiskSize" IsReadOnly="True"/>
+                        <TextBlock Text="Customer-owned staging account (same subscription)" Style="{StaticResource FieldLabel}"/><ComboBox Name="StoragePicker"/>
+                        <TextBlock Text="Existing PRIVATE blob container" Style="{StaticResource FieldLabel}"/><TextBox Name="ContainerName" Text="cpc-migration"/>
+                        <TextBlock Text="Destination resource group for temporary managed snapshots" Style="{StaticResource FieldLabel}"/><ComboBox Name="SnapshotGroup" ToolTip="Existing resource group in the connected subscription. This is independent of the source VM resource-group filter."/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Name="ResumeHintText" Text="Continuing a previous migration? Connect, then Resume / load journal before creating draft mappings. Cloud settings and artifacts survive an app restart; only the original journal restores their ownership." Foreground="#FDE68A" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                        <Button Name="ResumeButton" Content="Resume / load journal" ToolTip="After connecting, load the trusted original journal in a fresh session. Do not create new mappings for a migration already in progress." Background="#0369A1"/>
+                        <Button Name="JournalManagerButton" Content="Manage saved journals / archive" ToolTip="List saved plans by VM and phase. Archive unused startup/draft or fully cleaned/abandoned journals without deleting recovery records. No cloud changes."/>
+                        <TextBlock Text="Before you begin" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="#CBD5E1" Margin="0,12,0,16" Text="1. Check/install local modules.&#10;2. Connect with an authorized admin account.&#10;3. Discover resources; choose policy, SKU and staging.&#10;4. Select VMs and map unique user UPNs.&#10;5. Review automatic log/journal paths in Activity log (Save As is optional).&#10;6. Assess running guests, attest and check prerequisites.&#10;7. Prepare identity; wait for propagation, then check again.&#10;8. Capture, refresh until Staged, import and refresh until Imported.&#10;9. Assign license, monitor and validate user experience.&#10;10. Cleanup only after retention requirements are met."/>
+                        <Button Name="LocalButton" Content="Check workstation prerequisites"/><Button Name="InstallButton" Content="Install / update dependencies"/>
+                        <Border Background="#172A45" Padding="14" Margin="0,14,0,0"><TextBlock TextWrapping="Wrap" Foreground="#BAE6FD" Text="No MCP or web server. Interactive Azure/Graph sign-in. Storage uses Entra OAuth and short-lived read-only SAS. No storage account keys or credentials are written to the plan."/></Border>
+                        <TextBlock TextWrapping="Wrap" Foreground="#94A3B8" Margin="0,16,0,0" Text="Preview API access, eligible licenses, policy region/join/network, source backup and user approval are your responsibility. The app does not relax firewalls, uninstall agents, decrypt disks, create networks or generalize the source VM."/>
+                    </StackPanel>
+                </Grid></ScrollViewer>
+            </TabItem>
+            <TabItem Header="2  Select &amp; map">
+                <Grid Margin="16" TextElement.Foreground="#E2E8F0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <StackPanel Margin="0,0,0,10">
+                        <TextBlock Text="Select a source resource group, check the VM(s), then enter a unique target user UPN for each. Target settings come from the first tab." TextWrapping="Wrap"/>
+                        <TextBlock Name="VmScopeText" Text="Connect a subscription and discover inventory first." Foreground="#BAE6FD" Margin="0,5,0,0" TextWrapping="Wrap"/>
+                        <TextBlock Text="After checking VMs and entering UPNs: find user groups, then explicitly select the group already assigned to your Enterprise policy." Margin="0,12,0,5" TextWrapping="Wrap"/>
+                        <DockPanel><Button Name="FindGroupsButton" Content="Find groups for selected users + policy" DockPanel.Dock="Left"/><ComboBox Name="UserGroupPicker" MinWidth="300" ToolTip="Common direct user memberships assigned to the selected Enterprise policy. No automatic selection. All group members must be mapped because the snapshot setting applies group-wide."/></DockPanel>
+                        <TextBlock Name="UserGroupHint" Text="Choose the Enterprise policy in Connect &amp; configure first. No user setting is assigned directly to a user; users receive it through the selected group." Foreground="#FDE68A" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <Grid Grid.Row="1" Margin="0,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="2*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0"><TextBlock Text="Source VM resource group"/><ComboBox Name="SourceGroupPicker" ToolTip="Filters VMs in the connected subscription. Hidden checked VMs remain selected; review the total selection before mapping."/></StackPanel>
+                        <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock Text="Search VM / resource group / region"/><TextBox Name="SearchBox" MinWidth="180" ToolTip="Search combines with the resource-group filter; hidden selections remain selected."/></StackPanel>
+                        <Button Name="MapButton" Grid.Column="2" Content="Create / update draft mappings" ToolTip="Edits only the current unprepared draft. Does not replace a previous migration or its cloud settings. Use Resume / load journal to continue an existing migration." Background="#0369A1" VerticalAlignment="Bottom"/>
+                    </Grid>
+                    <DataGrid Name="VmGrid" Grid.Row="2"><DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Use" Binding="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                        <DataGridTextColumn Header="Target user UPN (edit)" Binding="{Binding UserPrincipalName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="250"/>
+                        <DataGridTextColumn Header="VM" Binding="{Binding Name}" IsReadOnly="True" Width="180"/><DataGridTextColumn Header="Resource group" Binding="{Binding ResourceGroup}" IsReadOnly="True" Width="180"/>
+                        <DataGridTextColumn Header="Region" Binding="{Binding Location}" IsReadOnly="True" Width="130"/><DataGridTextColumn Header="VM size" Binding="{Binding Size}" IsReadOnly="True" Width="180"/><DataGridTextColumn Header="OS" Binding="{Binding OS}" IsReadOnly="True" Width="100"/>
+                        <DataGridTextColumn Header="VM resource ID" Binding="{Binding Id}" IsReadOnly="True" Width="450"/>
+                    </DataGrid.Columns></DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="3  Migration">
+                <Grid Margin="16" TextElement.Foreground="#E2E8F0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="150"/></Grid.RowDefinitions>
+                    <WrapPanel><Button Name="SaveButton" Content="Save journal as... (optional)"/><Button Name="LoadButton" Content="Load journal"/><Button Name="ExportButton" Content="Export HTML / CSV / JSON"/><Button Name="RefreshButton" Content="Refresh status"/><CheckBox Name="AutoRefresh" Content="Auto-refresh selected (30s)" Margin="8,0,0,8"/></WrapPanel>
+                    <StackPanel Grid.Row="1" Margin="0,5,0,8">
+                    <Border Background="#172A45" Padding="10" Margin="0,0,0,8"><StackPanel><TextBlock Text="NEXT STEP · checked rows" FontWeight="Bold" Foreground="#38BDF8"/><TextBlock Name="NextStepText" Text="Connect, then resume a journal or create draft mappings." TextWrapping="Wrap" Foreground="#BAE6FD"/></StackPanel></Border>
+                    <TextBlock TextWrapping="Wrap" Foreground="#FDE68A" Margin="0,0,0,8" Text="Changed Windows join, BitLocker or agents? Before capture, repeat 1 Assess guest → 2 Attest prerequisites → 3 Validate prerequisites. Validate reuses saved guest evidence; restarting the VM does not refresh it. After capture, evidence is frozen—use recovery review instead."/>
+                    <WrapPanel>
+                        <Button Name="GuestButton" Content="1  Assess guest" ToolTip="Read current Windows join, BitLocker and agent evidence. Repeat after guest fixes while the source is running, before capture. Clears prior attestation and approval."/><Button Name="AttestButton" Content="2  Attest prerequisites"/><Button Name="CheckButton" Content="3  Validate prerequisites" Background="#0369A1" ToolTip="Uses saved guest assessment, not a new Windows reading. After guest fixes, repeat Assess guest and Attest first. Required before each major stage; approval is single-use and expires after 30 minutes."/>
+                        <Button Name="PrepareButton" Content="4  Prepare snapshot provisioning" ToolTip="Assign a new snapshot setting to the explicitly selected existing group. All members must be mapped and selected. Existing group membership and Enterprise policy assignments remain unchanged. Legacy journals retain their original owned-group flow."/><Button Name="CaptureButton" Content="5  Stop + capture" Background="#92400E"/><Button Name="ImportButton" Content="6  Import to W365"/>
+                        <Button Name="LicenseButton" Content="7  Start migration / assign license" Background="#92400E"/><Button Name="ValidateButton" Content="8  Validate cutover (final)"/><Button Name="CleanupButton" Content="9  Cleanup staging"/>
+                        <Button Name="RepairSnapshotButton" Content="Repair snapshot setting + assignments (batch)" Background="#0369A1" ToolTip="Repair the plan-owned snapshot setting and its group assignment. Selected existing groups and policy assignments are not modified; correct membership/policy issues in Entra/Intune first. Legacy owned-group journals retain membership/policy repair. No import or license write. Re-attest and validate afterward."/>
+                    </WrapPanel>
+                    </StackPanel>
+                    <DataGrid Name="PlanGrid" Grid.Row="2"><DataGrid.Columns>
+                        <DataGridCheckBoxColumn Header="Use" Binding="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                        <DataGridTextColumn Header="VM" Binding="{Binding VM}" IsReadOnly="True" Width="140"/><DataGridTextColumn Header="User" Binding="{Binding UserPrincipalName}" IsReadOnly="True" Width="220"/>
+                        <DataGridTextColumn Header="Phase" Binding="{Binding Phase}" IsReadOnly="True" Width="130"/><DataGridTextColumn Header="Readiness" Binding="{Binding Readiness}" IsReadOnly="True" Width="100"/>
+                        <DataGridTextColumn Header="Guest assessed (recorded)" Binding="{Binding GuestAssessmentText}" IsReadOnly="True" Width="245"/>
+                        <DataGridTextColumn Header="Import" Binding="{Binding ImportStatus}" IsReadOnly="True" Width="100"/><DataGridTextColumn Header="Cloud PC" Binding="{Binding CloudPcStatus}" IsReadOnly="True" Width="110"/>
+                        <DataGridTextColumn Header="Detail / copy progress" Binding="{Binding Detail}" IsReadOnly="True" Width="250"/><DataGridTextColumn Header="Last error" Binding="{Binding LastError}" IsReadOnly="True" Width="300"/>
+                    </DataGrid.Columns></DataGrid>
+                    <TextBox Name="RowJson" Grid.Row="3" Margin="0,10,0,0" IsReadOnly="True" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11" Text="Select a row to inspect guest evidence and recorded resource IDs."/>
+                </Grid>
+            </TabItem>
+            <TabItem Header="4  Prerequisite results">
+                <Grid Margin="16" TextElement.Foreground="#E2E8F0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <TextBlock TextWrapping="Wrap" Margin="0,0,0,12" Text="Changed Windows join, BitLocker or agents? Before capture, return to Migration and repeat 1 Assess guest → 2 Attest prerequisites → 3 Validate prerequisites. Guest checks reuse saved evidence; see its collection time in Evidence / remediation (Checked UTC below is the validation time). After capture, evidence is frozen—use recovery review instead. Obtain PASS before EACH major stage; approval is single-use and expires in 30 minutes. Final Validate cutover is separate. Manual items remain operator attestations, not automatic proof."/>
+                    <DataGrid Name="CheckGrid" Grid.Row="1" IsReadOnly="True">
+                        <DataGrid.RowStyle><Style TargetType="DataGridRow"><Style.Triggers>
+                            <DataTrigger Binding="{Binding Status}" Value="Fail"><Setter Property="Foreground" Value="#B91C1C"/><Setter Property="Background" Value="#FEF2F2"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
+                            <DataTrigger Binding="{Binding Status}" Value="Manual"><Setter Property="Foreground" Value="#92400E"/><Setter Property="Background" Value="#FFFBEB"/></DataTrigger>
+                        </Style.Triggers></Style></DataGrid.RowStyle><DataGrid.Columns>
+                        <DataGridTextColumn Header="VM / scope" Binding="{Binding VM}" Width="150"/><DataGridTextColumn Header="Check" Binding="{Binding Check}" Width="270"/><DataGridTextColumn Header="Result" Binding="{Binding Status}" Width="80"/>
+                        <DataGridTextColumn Header="Evidence / remediation" Binding="{Binding Detail}" Width="*"/><DataGridTextColumn Header="Checked UTC" Binding="{Binding CheckedUtc}" Width="180"/>
+                    </DataGrid.Columns></DataGrid>
+                </Grid>
+            </TabItem>
+            <TabItem Header="5  Dashboard &amp; Graph">
+                <Grid Margin="16" TextElement.Foreground="#E2E8F0"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="150"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <UniformGrid Columns="4" Margin="0,0,0,12">
+                        <StackPanel><TextBlock Text="MAPPED" Foreground="#94A3B8"/><TextBlock Name="TotalCard" Text="0" FontSize="30"/></StackPanel>
+                        <StackPanel><TextBlock Text="CHECKS READY" Foreground="#94A3B8"/><TextBlock Name="ReadyCard" Text="0" FontSize="30" Foreground="#38BDF8"/></StackPanel>
+                        <StackPanel><TextBlock Text="IMPORT SUCCEEDED" Foreground="#94A3B8"/><TextBlock Name="ImportedCard" Text="0" FontSize="30" Foreground="#FDE68A"/></StackPanel>
+                        <StackPanel><TextBlock Text="CUTOVER VALIDATED" Foreground="#94A3B8"/><TextBlock Name="ValidatedCard" Text="0" FontSize="30" Foreground="#6EE7B7"/></StackPanel>
+                    </UniformGrid>
+                    <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="230"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,0,18,0"><StackPanel Name="ChartPanel"/></ScrollViewer>
+                        <DataGrid Name="GraphGrid" Grid.Column="1" IsReadOnly="True"><DataGrid.Columns><DataGridTextColumn Header="UTC" Binding="{Binding Time}" Width="160"/><DataGridTextColumn Header="Verb" Binding="{Binding Method}" Width="70"/><DataGridTextColumn Header="Graph endpoint" Binding="{Binding Path}" Width="*"/><DataGridTextColumn Header="Client request ID" Binding="{Binding ClientRequestId}" Width="240"/></DataGrid.Columns></DataGrid>
+                    </Grid>
+                    <TextBox Name="GraphJson" Grid.Row="2" Margin="0,12,0,10" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Text="Select a Graph response. SAS query strings are redacted; user identifiers remain sensitive."/>
+                    <StackPanel Grid.Row="3">
+                        <TextBlock Name="RecoveryScopeText" Text="Recovery applies to Use-checked rows on the Migration tab, not the highlighted Graph response." Foreground="#FDE68A" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                        <WrapPanel><Button Name="PurgeButton" Content="Purge unused W365 import" Background="#7F1D1D"/><Button Name="RevokeButton" Content="Revoke Azure export"/><Button Name="ImageButton" Content="Use images for future reprovision"/><TextBox Name="ImportId" Width="240" Margin="5,0,8,7" ToolTip="Known snapshot ID for a selected ImportUnknown row. No SAS or token."/><Button Name="ReconcileButton" Content="Reconcile unknown import ID"/></WrapPanel>
+                        <WrapPanel><Button Name="ResetCaptureButton" Content="Reset failed / purged capture" Background="#7F1D1D"/><Button Name="AbandonButton" Content="Abandon + remove owned artifacts" Background="#7F1D1D"/></WrapPanel>
+                        <TextBlock Text="LicenseUnknown recovery (read-only): reviewed Entra audit/request reference + actual assignment UTC time. No secrets." Foreground="#CBD5E1" TextWrapping="Wrap"/>
+                        <WrapPanel><TextBox Name="LicenseEvidence" Width="360" Margin="5,4,8,7" ToolTip="Audit/request reference verifying this exact user/SKU assignment; never tokens."/><TextBox Name="LicenseAssignedUtc" Width="230" Margin="5,4,8,7" ToolTip="Actual assignment UTC time: yyyy-MM-ddTHH:mm:ssZ"/><Button Name="ReconcileLicenseButton" Content="Reconcile license (no write)"/></WrapPanel>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+            <TabItem Header="6  Activity log">
+                <DockPanel Margin="16">
+                    <TextBox Name="LogLocationText" DockPanel.Dock="Top" IsReadOnly="True" TextWrapping="Wrap" Margin="0,0,0,10" ToolTip="Automatic session log and current recovery journal. Select/copy these paths; neither contains credentials."/>
+                    <TextBox Name="LogBox" IsReadOnly="True" AcceptsReturn="True" FontFamily="Consolas" FontSize="12" Background="#0B1220" Foreground="#CBD5E1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+        <StackPanel Grid.Row="3" Margin="0,12,0,0">
+            <TextBlock Name="PlanLabel" Text="No migration plan loaded" FontSize="11" Foreground="#94A3B8" TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" Margin="0,0,0,7"/>
+            <DockPanel><Button Name="CancelButton" Content="Stop after current step" DockPanel.Dock="Right" IsEnabled="False"/><TextBlock Name="StatusText" Text="Ready — start with workstation prerequisites" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></DockPanel>
+            <ProgressBar Name="WorkProgress" Height="3" Foreground="#38BDF8" Background="#1E293B"/>
+        </StackPanel>
+    </Grid>
+</Window>
