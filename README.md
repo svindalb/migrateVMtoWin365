@@ -10,7 +10,7 @@ The tool guides an administrator through selecting a source VM and target user, 
 
 ## Where to start
 
-1. **[Installation and prerequisites](../README.md#start)** — PowerShell, required modules, startup and tenant selection. Review the root README's supported scope and permissions before connecting.
+1. **[Installation and prerequisites](docs/README.md#start)** — PowerShell, required modules, startup and tenant selection. Review the root README's supported scope and permissions before connecting.
 2. **[Simple button reference](docs/OPERATOR-GUIDE.md#simple-button-reference)** — what each button does and when to use it.
 3. **[Full operator guide](docs/OPERATOR-GUIDE.md)** — every tab, input, selection rule, confirmation, stage and recovery action.
 4. **[Resume an existing migration](docs/OPERATOR-GUIDE.md#resume-playbook)** — use the original journal rather than creating another draft.
