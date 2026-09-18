@@ -4,14 +4,6 @@ A standalone **PowerShell 7 / WPF** desktop application. Connects directly to Az
 
 > **Controlled-pilot implementation, not a Microsoft-supported migration product.** The migration APIs are documented under **Microsoft Graph beta**. Microsoft states that beta APIs can change and are not supported for production application use. Validate tenant access and run an approved, recoverable pilot before considering broader use. Offline regression/UI tests have passed; on **2026-09-17**, the operator reported successful pilot provisioning and that everything was OK, with the UI showing **Cleaned** (recorded acceptance and staging cleanup). **This operator-reported pilot result is not independent certification of all data, environments or failure-recovery paths.**
 
-## Current status and resuming development
-
-**[Project status and new-session handoff](project-status/PROJECT-STATUS.md)** records where development stands, the completed pilot, latest fixes/test results, test-history disposal, safety constraints and remaining work. It includes a short prompt to paste into a new assistant session. Read this checkpoint before continuing development; update it after meaningful changes.
-
-Documentation is separated by audience: **[docs/README.md](docs/README.md)** is the administrator starting point; **[project-status/README.md](project-status/README.md)** indexes assistant/developer handoff, engineering reviews and API research.
-
-**2026-09-17 checkpoint:** before disposal, the pilot journal recorded Cleaned/provisioned; the corrected Use images request was accepted and `image` was confirmed by Graph read-back. At the operator's request after testing finished, all nine session logs and nine archived journals with audit sidecars were deleted for colleague handover; the archive folder is empty. No cloud resources were changed. The completed pilot cannot be resumed from this workspace; do not repeat it. A new launch creates fresh logs/journals for the next approved test.
-
 ## Operator documentation
 
 **[Start with the simple button reference: what each button does and when to click it](docs/OPERATOR-GUIDE.md#simple-button-reference).** It covers every tab and dialog without requiring the technical implementation details.
