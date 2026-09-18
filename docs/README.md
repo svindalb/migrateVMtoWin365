@@ -30,7 +30,7 @@ Use this README for installation, prerequisites, technical boundaries and tests;
 6. **Validate again → Start migration / assign license → Refresh until Provisioned:** triggers creation of the Cloud PC.
 7. **Test the actual Cloud PC → Validate cutover:** verify user sign-in, migrated files/apps and acceptance. Service success alone is not enough.
 8. **Cleanup staging when retention permits:** deletes owned Azure staging/snapshots, not the source VM or Cloud PC.
-9. **Use images before changing group membership:** once the entire batch is validated/cleaned/safely abandoned, switch the setting to normal image provisioning and confirm success/allow propagation before adding users. Existing PCs are untouched; keep their policy membership. [Detailed explanation](docs/OPERATOR-GUIDE.md#return-the-group-to-normal-image-provisioning-before-changing-membership).
+9. **Use images before changing group membership:** once the entire batch is validated/cleaned/safely abandoned, switch the setting to normal image provisioning and confirm success/allow propagation before adding users. Existing PCs are untouched; keep their policy membership. [Detailed explanation](OPERATOR-GUIDE.md#return-the-group-to-normal-image-provisioning-before-changing-membership).
 
 **Resuming?** Connect → load the **original** journal → Refresh first → follow NEXT STEP. Do not repeat completed actions. Renew Attest when indicated (for example after load/repair/reassessment); every major stage needs its own Validate approval.
 
@@ -280,7 +280,3 @@ pwsh -NoProfile -STA -File .\Start-CpcMigration.ps1 -SmokeTest -TenantId "222222
 ```
 
 Tests check PowerShell parsing, import payloads, SAS redaction, RBAC, nullable Azure models, user/source continuity, license gates, explicit-vs-automatic stage approval, UTC expiry, single-use approvals, removed policy assignments and snapshot/copy/VHD/VMGS failure cases. Workflow tests cover forward/recovery action availability across phases, mixed selections, prepared-plan locks and read-only journal discovery. WPF smoke testing renders the license picker, saved guest timestamp and resource-review dialog, including acknowledgement and default-Cancel behavior; it also checks loaded-plan guidance, in-flight button disabling, expiry and click-time guards. **None of these tests certifies live API availability, Azure export permissions, target bootability or end-to-end migration.**
-
-## Research scope
-
-Relevant public product/API/Azure documentation and accessible internal migration references were reviewed on **2026-09-17**. This is not a claim to have enumerated every public/internal document. Public HTTP contracts take precedence over draft schemas or backend service routes. See [project-status/SOURCES.md](project-status/SOURCES.md) for traceable sources and known discrepancies.
