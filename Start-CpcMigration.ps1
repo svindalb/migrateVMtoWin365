@@ -116,6 +116,12 @@ function Confirm-Change([string]$Text) {
     return (Invoke-UiModal { [windows.messagebox]::Show($window,$Text,'Confirm cloud changes','YesNo','Warning','No') }) -eq 'Yes'
 }
 
+function Confirm-NewMigrationCycle($Candidates) {
+    $details = ($Candidates | ForEach-Object { "Plan: $($_.PlanId)`nLast saved UTC: $($_.ModifiedUtc.ToString('o'))`n$($_.Summary)`nJournal: $($_.Path)" }) -join "`n`n"
+    $text = "This source VM was used by one or more completed migration plans:`n`n$details`n`nStart a NEW migration cycle for this source VM?`n`nYes records these plans as predecessors and continues mapping. It does not delete or modify their journals and does not bypass live checks for Cloud PCs, licenses, imports, settings or artifacts.`n`nNo cancels mapping."
+    return (Invoke-UiModal { [windows.messagebox]::Show($window,$text,'Start new migration cycle?','YesNo','Warning','No') }) -eq 'Yes'
+}
+
 function Get-SelectedIds {
     $ui.PlanGrid.CommitEdit([Windows.Controls.DataGridEditingUnit]::Cell,$true) | Out-Null
     $ui.PlanGrid.CommitEdit([Windows.Controls.DataGridEditingUnit]::Row,$true) | Out-Null
@@ -243,6 +249,7 @@ function Get-OperationReview([string]$Action, [hashtable]$Data = @{}) {
         SnapshotSettingName = if ($script:Last) { 'Snapshot-' + $script:Last.PlanId } else { '(not created)' }
         SnapshotSettingId = if ($script:Last -and $script:Last.UserSettingId) { $script:Last.UserSettingId } else { '(server ID returned after Prepare)' }
         ExplicitPreflight = if ($script:Last) { $script:Last.Preflight } else { @{} }
+        PriorMigrationCycles = if ($Data.ContainsKey('Predecessors')) { @($Data.Predecessors) } elseif ($script:Last -and $script:Last.Predecessors) { @($script:Last.Predecessors) } else { @() }
     }
     return Get-CpcConfirmationText $Action $scope $rows $Data
 }
@@ -269,9 +276,17 @@ function Start-Operation([string]$Action,[hashtable]$Data = @{}, [switch]$Automa
     if ($Action -eq 'Map') {
         $overlap = @(Get-LocalResumeCandidates @($Data.Mappings | ForEach-Object VmId) | Where-Object Prepared)
         if ($overlap.Count) {
-            $paths = ($overlap | ForEach-Object { "$($_.Summary)`n$($_.Path)" }) -join "`n`n"
-            Show-Notice "These VMs already appear in a prepared local migration journal. Creating draft mappings cannot replace its cloud settings or restore ownership. Resume the original journal instead; do not delete assignments or recreate the plan to bypass this warning.`n`n$paths`n`nIf a draft is already open, restart, connect, then Resume / load journal before mapping."
-            return
+            $unfinished = @($overlap | Where-Object { -not $_.NewCycleEligible })
+            if ($unfinished.Count) {
+                $paths = ($unfinished | ForEach-Object { "$($_.Summary)`nPlan $($_.PlanId)`n$($_.Path)" }) -join "`n`n"
+                Show-Notice "These VMs appear in an unfinished prepared migration journal. A new migration cycle is allowed only after every row in each prior plan is Cleaned or safely Abandoned. Resume the original journal instead; do not delete assignments or journals to bypass this protection.`n`n$paths`n`nRestart, connect, then Resume / load journal before mapping."
+                return
+            }
+            if (-not (Confirm-NewMigrationCycle $overlap)) { return }
+            $Data.Predecessors = @($overlap | ForEach-Object { @{
+                PlanId = $_.PlanId; JournalPath = $_.Path; JournalFingerprint = $_.Fingerprint
+                LastSavedUtc = $_.ModifiedUtc.ToString('o'); Summary = $_.Summary
+            } })
         }
     }
     # Startup initializes the journal; never mutate if it is unavailable.

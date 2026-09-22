@@ -204,7 +204,8 @@ function Find-CpcResumeJournals {
                 $matching = @($rows | Where-Object { -not $VmIds.Count -or (Get-WorkflowValue $_ 'VmId') -in $VmIds })
                 if (-not $matching.Count) { continue }
                 $prepared = [bool](Get-WorkflowValue $s 'GroupId') -or [bool](Get-WorkflowValue $s 'UserSettingId') -or @($rows | Where-Object { (Get-WorkflowValue $_ 'Phase') -ne 'Mapped' }).Count -gt 0
-                [pscustomobject]@{ Path = $file.FullName; PlanId = $s.PlanId; Prepared = $prepared; ModifiedUtc = $file.LastWriteTimeUtc; Summary = (($matching | ForEach-Object { "$(Get-WorkflowValue $_ 'VM') [$(Get-WorkflowValue $_ 'Phase')]" }) -join ', ') }
+                $newCycleEligible = @($rows | Where-Object { (Get-WorkflowValue $_ 'Phase') -notin @('Cleaned','Abandoned') }).Count -eq 0
+                [pscustomobject]@{ Path = $file.FullName; PlanId = $s.PlanId; Prepared = $prepared; NewCycleEligible = $newCycleEligible; Fingerprint = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash; ModifiedUtc = $file.LastWriteTimeUtc; Summary = (($matching | ForEach-Object { "$(Get-WorkflowValue $_ 'VM') [$(Get-WorkflowValue $_ 'Phase')]" }) -join ', ') }
             } catch { continue }
         }
     }

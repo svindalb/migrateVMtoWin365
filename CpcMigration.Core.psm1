@@ -153,6 +153,7 @@ function Initialize-CpcState {
         Catalog = @{ Subscriptions = @(); ResourceGroups = @(); Vms = @(); Policies = @(); Skus = @(); Storage = @(); Groups = @() }
         Config = @{ PolicyId = ''; SkuId = ''; TargetDiskGiB = 0; StorageId = ''; Container = ''; SnapshotResourceGroup = '' }
         GroupId = ''; UserSettingId = ''; StatePath = ''; Connected = $false
+        Predecessors = @()
         Preflight = @{} # Session-only, single-use approvals; never restored from a journal.
     }
 }
@@ -166,7 +167,7 @@ function Save-CpcState($State = $script:S, $Lease = $null) {
     $planLease = Open-CpcPlanLease $State
     # Explicit whitelist: no tokens, storage contexts, SAS URLs or request bodies persisted.
     $persist = [ordered]@{}
-    foreach ($key in @('SchemaVersion','PlanId','TenantId','SubscriptionId','Config','GroupId','UserSettingId','Rows','Checks')) {
+    foreach ($key in @('SchemaVersion','PlanId','TenantId','SubscriptionId','Config','GroupId','UserSettingId','Predecessors','Rows','Checks')) {
         $persist[$key] = $State[$key]
     }
     $json = Protect-CpcText ($persist | ConvertTo-Json -Depth 30)
@@ -722,6 +723,39 @@ function Set-CpcMappings($Data) {
             SourceVmUniqueId = ''; SourceDiskId = ''; CaptureStartedUtc = ''; ImportStartedUtc = ''; LicenseAssignedUtc = ''; ValidatedUtc = ''; LastError = ''
         })
     }
+    $predecessors = [System.Collections.Generic.List[object]]::new()
+    $predecessorPlans = @{}
+    foreach ($reference in @(Get-Value $Data 'Predecessors' @())) {
+        $planId = Assert-CpcGuid ([string](Get-Value $reference 'PlanId')) 'Predecessor plan ID'
+        $path = [IO.Path]::GetFullPath([string](Get-Value $reference 'JournalPath'))
+        $expectedFingerprint = [string](Get-Value $reference 'JournalFingerprint')
+        if ($expectedFingerprint -notmatch '^[A-Fa-f0-9]{64}$' -or -not [IO.File]::Exists($path)) { throw 'Confirmed predecessor journal is unavailable or its fingerprint is invalid. Review local migration history again.' }
+        $file = [IO.FileInfo]$path
+        if ($file.Length -gt 32MB -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Confirmed predecessor journal is too large or is reached through an unsupported reparse point.' }
+        $bytes = [IO.File]::ReadAllBytes($path)
+        $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        if ($fingerprint -ne $expectedFingerprint) { throw 'Confirmed predecessor journal changed after review. Mapping was not saved; review the latest journal state.' }
+        $text = [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
+        $prior = $text | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $priorRows = @(Get-Value $prior 'Rows' @())
+        if ((Get-Value $prior 'SchemaVersion') -ne 1 -or (Get-Value $prior 'PlanId') -ne $planId -or
+            (Get-Value $prior 'TenantId') -ne $script:S.TenantId -or (Get-Value $prior 'SubscriptionId') -ne $script:S.SubscriptionId -or
+            -not $priorRows.Count -or @($priorRows | Where-Object { (Get-Value $_ 'Phase') -notin @('Cleaned','Abandoned') }).Count) {
+            throw 'Confirmed predecessor is not a fully terminal migration plan in the active tenant/subscription. Resume it instead.'
+        }
+        $matching = @($priorRows | Where-Object { (Get-Value $_ 'VmId') -in @($new | ForEach-Object VmId) })
+        if (-not $matching.Count) { throw 'Confirmed predecessor no longer contains a selected source VM. Mapping was not saved.' }
+        if ($predecessorPlans.ContainsKey($planId)) {
+            if ($predecessorPlans[$planId] -ne $fingerprint) { throw 'Different copies of the same predecessor plan were found. Reconcile the journal copies before starting a new cycle.' }
+            continue
+        }
+        $predecessorPlans[$planId] = $fingerprint
+        $predecessors.Add([ordered]@{
+            PlanId = $planId; JournalPath = $path; JournalFingerprint = $fingerprint
+            LastSavedUtc = [string](Get-Value $reference 'LastSavedUtc'); ConfirmedUtc = [datetime]::UtcNow.ToString('o')
+            Summary = (($matching | ForEach-Object { "$(Get-Value $_ 'VM') [$(Get-Value $_ 'Phase')]" }) -join ', ')
+        })
+    }
     Update-CpcLicenseCatalog
     $group = Assert-CpcSelectedGroup $Data.Config $new
     $config = $Data.Config.Clone()
@@ -730,7 +764,7 @@ function Set-CpcMappings($Data) {
     $config.TargetDiskGiB = [int]$license.StorageGB
     Assert-CpcConfig $config
     $candidate = $script:S.Clone()
-    $candidate.Config = $config; $candidate.Preflight = @{}; $candidate.Rows = $new
+    $candidate.Config = $config; $candidate.Preflight = @{}; $candidate.Predecessors = @($predecessors); $candidate.Rows = $new
     Save-CpcState -State $candidate
     $script:S = $candidate
     Write-CpcLog "Saved $($new.Count) VM-to-user mappings. $($license.DisplayName); $($license.Available) available licenses."
@@ -2001,6 +2035,7 @@ function Invoke-CpcOperation {
                 Assert-CpcConfig $loaded.Config
                 $candidate = $script:S.Clone()
                 foreach ($k in @('PlanId','Config','GroupId','UserSettingId')) { $candidate[$k] = $loaded[$k] }
+                $candidate.Predecessors = @(Get-Value $loaded 'Predecessors' @())
                 foreach ($key in @('GroupId','UserSettingId')) { if ($candidate[$key]) { $null = Assert-CpcGuid $candidate[$key] $key } }
                 $candidate.Preflight = @{}
                 $candidate.Checks = [collections.generic.list[object]]::new()
@@ -2043,7 +2078,7 @@ function Invoke-CpcOperation {
             $view | Add-Member -NotePropertyName StatusRefreshSucceeded -NotePropertyValue ($Action -eq 'Refresh' -and $script:RefreshSucceededIds.Contains($_.VmId))
             $view
         }); Checks = @($script:S.Checks)
-        Catalog = $script:S.Catalog; GraphResults = @($script:S.GraphResults); Config = $script:S.Config
+        Catalog = $script:S.Catalog; GraphResults = @($script:S.GraphResults); Config = $script:S.Config; Predecessors = @($script:S.Predecessors)
         Connected = $script:S.Connected; GroupId = $script:S.GroupId; UserSettingId = $script:S.UserSettingId
         PlanId = $script:S.PlanId; StatePath = $script:S.StatePath
         TenantId = $script:S.TenantId; SubscriptionId = $script:S.SubscriptionId
@@ -2056,7 +2091,7 @@ function Invoke-CpcOperation {
         # Persist every result listed in the UI: catalog, checks, rows, phase/status,
         # configuration, and errors. Approval receipts remain session-only.
         $listed = [ordered]@{ Action = $Action }
-        foreach ($key in @('Rows','Checks','Catalog','GraphResults','Config','Connected','GroupId','UserSettingId','PlanId','StatePath','TenantId','SubscriptionId','RequiredTenantId','LogPath','OperationError')) { $listed[$key] = $output.$key }
+        foreach ($key in @('Rows','Checks','Catalog','GraphResults','Config','Predecessors','Connected','GroupId','UserSettingId','PlanId','StatePath','TenantId','SubscriptionId','RequiredTenantId','LogPath','OperationError')) { $listed[$key] = $output.$key }
         Write-CpcSessionRecord 'DisplayedResult' $listed
         if ($script:LogStream -and $Action -notin @('Map','Load','Save')) { Save-CpcState }
     } catch {

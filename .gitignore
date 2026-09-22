@@ -1,0 +1,15 @@
+# Generated migration data contains tenant/resource/user identifiers.
+reports/
+journals/
+*.tmp
+migration-plan*.json
+migration-*.json
+migration-*.log
+migration-results.csv
+migration-report.html
+prerequisites.json
+graph-results.redacted.json
+activity.log
+*.lock
+*.events.jsonl
+*.events.jsonl.1
