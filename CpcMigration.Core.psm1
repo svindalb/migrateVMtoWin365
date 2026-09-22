@@ -315,6 +315,34 @@ function New-CpcUserSettingSourceBody($Setting, [ValidateSet('image','snapshot')
     return $body
 }
 
+function Get-CpcOwnedUserSettingName {
+    $name = [string](Get-Value $script:S.Config 'UserSettingName' '')
+    if ($name) { return $name }
+    return 'Snapshot-' + $script:S.PlanId
+}
+
+function Get-CpcReusableUserSetting($Settings, [string]$GroupId) {
+    if (-not $GroupId -or $script:S.UserSettingId) { return $null }
+    $direct = @($Settings | Where-Object {
+        @((Get-Value $_ 'assignments' @()) | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -eq $GroupId }).Count -gt 0
+    })
+    if ($direct.Count -ne 1) { return $null }
+    $setting = $direct[0]
+    $assignments = @(Get-Value $setting 'assignments' @())
+    $source = [string](Get-Value $setting 'provisioningSourceType' '')
+    $name = [string](Get-Value $setting 'displayName' '')
+    $namePlanId = [guid]::Empty
+    $toolName = $name.StartsWith('Snapshot-', [StringComparison]::Ordinal) -and
+        [guid]::TryParse($name.Substring('Snapshot-'.Length), [ref]$namePlanId) -and $namePlanId -ne [guid]::Empty
+    if ($assignments.Count -ne 1 -or -not (Test-CpcGroupTarget (Get-Value $assignments[0] 'target')) -or
+        (Get-Value (Get-Value $assignments[0] 'target') 'groupId') -ne $GroupId -or
+        $source -notin @('image','snapshot') -or -not $toolName -or
+        (Get-Value $setting 'localAdminEnabled') -isnot [bool] -or (Get-Value $setting 'resetEnabled') -isnot [bool]) {
+        return $null
+    }
+    return $setting
+}
+
 function Get-CpcGraphCollection([string]$Path) {
     $seen = [System.Collections.Generic.HashSet[string]]::new()
     do {
@@ -821,6 +849,16 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
     } catch { Add-CpcCheck 'Batch' 'License eligibility / availability' 'Fail' $_.Exception.Message }
     $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs")
     $settings = @(Get-CpcGraphCollection "$script:Endpoint/userSettings?`$expand=assignments")
+    $reusableSetting = $null
+    $existingGroupId = [string](Get-Value $script:S.Config 'ExistingGroupId' '')
+    if ($Preparing -and $existingGroupId) { $reusableSetting = Get-CpcReusableUserSetting $settings $existingGroupId }
+    foreach ($key in @('ReusableUserSettingId','ReusableUserSettingName','ReusableUserSettingSource')) { $script:S.Config.Remove($key) }
+    if ($reusableSetting) {
+        $script:S.Config.ReusableUserSettingId = [string](Get-Value $reusableSetting 'id')
+        $script:S.Config.ReusableUserSettingName = [string](Get-Value $reusableSetting 'displayName')
+        $script:S.Config.ReusableUserSettingSource = [string](Get-Value $reusableSetting 'provisioningSourceType')
+        Add-CpcCheck 'Batch' 'Reusable group user setting' 'Manual' "Prepare will claim existing setting $($script:S.Config.ReusableUserSettingName) [$($script:S.Config.ReusableUserSettingId)] assigned only to group $existingGroupId and ensure provisioningSourceType=snapshot. Current source: $($script:S.Config.ReusableUserSettingSource). This is allowed only after confirming any previous migration is complete or abandoned and its journal is intentionally unavailable."
+    }
     $rgScope = "/subscriptions/$($script:S.SubscriptionId)/resourceGroups/$($script:S.Config.SnapshotResourceGroup)"
     $snapPerms = @(Get-CpcPermissions $rgScope)
     $storagePerms = @(Get-CpcPermissions $script:S.Config.StorageId)
@@ -906,7 +944,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             })
             $tests['No conflicting provisioning policy'] = @($applicable | Where-Object { $_.id -ne $script:S.Config.PolicyId }).Count -eq 0
             $otherSettings = @($settings | Where-Object {
-                $_.id -ne $script:S.UserSettingId -and @((Get-Value $_ 'assignments' @()) | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -in $groupIds }).Count -gt 0
+                $_.id -ne $script:S.UserSettingId -and $_.id -ne (Get-Value $reusableSetting 'id') -and @((Get-Value $_ 'assignments' @()) | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -in $groupIds }).Count -gt 0
             })
             $tests['No conflicting user setting'] = $otherSettings.Count -eq 0
             if (-not $Preparing -and $row.Phase -ne 'Mapped') {
@@ -932,8 +970,14 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             foreach ($test in $tests.GetEnumerator()) {
                 $detail = Get-CpcGuestCheckDetail $row $test.Key
                 if ($test.Key -eq 'No conflicting user setting' -and -not $test.Value) {
-                    $conflicts = ($otherSettings | ForEach-Object { "$(Get-Value $_ 'displayName' '(unnamed)') [$(Get-Value $_ 'id' '(unknown ID)')]" }) -join '; '
-                    $detail = "Other assigned user settings: $conflicts. Current plan: $($script:S.PlanId); owned setting: '$($script:S.UserSettingId)'. If this is a setting created during an earlier run, restart and Resume / load its original journal after connecting, BEFORE creating draft mappings. A new draft does not restore ownership or replace cloud settings. Do not delete unrelated assignments to bypass this check."
+                    $conflicts = ($otherSettings | ForEach-Object { "$(Get-Value $_ 'displayName' '(unnamed)') [$(Get-Value $_ 'id' '(unknown ID)'); source: $(Get-Value $_ 'provisioningSourceType' 'unknown')]" }) -join '; '
+                    $imageOnly = @($otherSettings | Where-Object { (Get-Value $_ 'provisioningSourceType' '') -ne 'image' }).Count -eq 0
+                    $next = if ($imageOnly) {
+                        'The setting is already in image mode, so Use images succeeded; that action intentionally keeps its group assignment. This new plan does not own it. An Intune administrator must review whether to retain or retire that prior setting assignment, then start a fresh plan. Removing an assignment can also change local-admin, reset, restore or disaster-recovery behavior.'
+                    } else {
+                        'If this setting belongs to an unfinished earlier migration, restart and Resume / load its original journal after connecting, BEFORE creating draft mappings.'
+                    }
+                    $detail = "Other assigned user settings: $conflicts. Current plan: $($script:S.PlanId); owned setting: '$($script:S.UserSettingId)'. $next A new draft does not restore ownership or replace cloud settings. Do not delete unrelated assignments to bypass this check."
                 }
                 if (-not $detail) { $detail = if ($test.Key -eq 'Target disk capacity') { "OS disk $($disk.DiskSizeGB) GiB <= resolved license target $($script:S.Config.TargetDiskGiB) GiB" } elseif ($test.Value) { 'Check passed.' } else { 'Failure or unknown is blocking; see operator guide.' } }
                 Add-CpcCheck $row.VM $test.Key $(if ($test.Value) { 'Pass' } else { 'Fail' }) $detail
@@ -1128,25 +1172,57 @@ function Prepare-CpcIdentity($Rows) {
         Save-CpcState
     }
     if (-not $script:S.UserSettingId) {
-        $settingName = 'Snapshot-' + $script:S.PlanId
-        $existing = @(Get-CpcGraphCollection "$script:Endpoint/userSettings" | Where-Object { $_.displayName -eq $settingName })
-        if ($existing.Count) { throw 'A same-named user setting exists but is not journaled. Reconcile before retry.' }
-        $setting = Invoke-CpcGraph -Method POST -Path "$script:Endpoint/userSettings" -Body @{
-            displayName = $settingName; provisioningSourceType = 'snapshot'; localAdminEnabled = $false; resetEnabled = $false
+        $reusableId = [string](Get-Value $script:S.Config 'ReusableUserSettingId' '')
+        if ($existingGroup -and $reusableId) {
+            $reusableId = Assert-CpcGuid $reusableId 'Reusable user setting ID'
+            $setting = Invoke-CpcGraph -Path "$script:Endpoint/userSettings/$reusableId`?`$expand=assignments"
+            $assignments = @(Get-Value $setting 'assignments' @())
+            if ((Get-Value $setting 'id') -ne $reusableId -or (Get-Value $setting 'displayName') -ne (Get-Value $script:S.Config 'ReusableUserSettingName') -or
+                (Get-Value $setting 'provisioningSourceType') -ne (Get-Value $script:S.Config 'ReusableUserSettingSource') -or
+                $assignments.Count -ne 1 -or -not (Test-CpcGroupTarget (Get-Value $assignments[0] 'target')) -or
+                (Get-Value (Get-Value $assignments[0] 'target') 'groupId') -ne $existingGroup) {
+                throw 'Reusable user setting changed after validation. No setting was claimed or modified; validate prerequisites again.'
+            }
+            $script:S.UserSettingId = $reusableId
+            $script:S.Config.UserSettingName = [string](Get-Value $setting 'displayName')
+            Save-CpcState
+            if ((Get-Value $setting 'provisioningSourceType') -eq 'image') {
+                $null = Invoke-CpcGraph -Method PATCH -Path "$script:Endpoint/userSettings/$reusableId" -Body (New-CpcUserSettingSourceBody $setting 'snapshot')
+            }
+            $verified = Invoke-CpcGraph -Path "$script:Endpoint/userSettings/$reusableId`?`$expand=assignments"
+            $verifiedAssignments = @(Get-Value $verified 'assignments' @())
+            if ((Get-Value $verified 'id') -ne $reusableId -or (Get-Value $verified 'displayName') -ne $script:S.Config.UserSettingName -or
+                (Get-Value $verified 'provisioningSourceType') -ne 'snapshot' -or $verifiedAssignments.Count -ne 1 -or
+                -not (Test-CpcGroupTarget (Get-Value $verifiedAssignments[0] 'target')) -or
+                (Get-Value (Get-Value $verifiedAssignments[0] 'target') 'groupId') -ne $existingGroup) {
+                throw 'Reusable setting snapshot switch was not confirmed by read-back. Do not create another setting or repeat Prepare; use controlled Repair after reviewing the latest GET.'
+            }
+            Write-CpcLog "Existing group setting $reusableId claimed by this journal and confirmed in snapshot mode. No new setting or assignment was created."
+        } else {
+            $settingName = 'Snapshot-' + $script:S.PlanId
+            $existing = @(Get-CpcGraphCollection "$script:Endpoint/userSettings" | Where-Object { $_.displayName -eq $settingName })
+            if ($existing.Count) { throw 'A same-named user setting exists but is not journaled. Reconcile before retry.' }
+            $setting = Invoke-CpcGraph -Method POST -Path "$script:Endpoint/userSettings" -Body @{
+                displayName = $settingName; provisioningSourceType = 'snapshot'; localAdminEnabled = $false; resetEnabled = $false
+            }
+            $script:S.UserSettingId = $setting.id
+            $script:S.Config.UserSettingName = $settingName
+            Save-CpcState
         }
-        $script:S.UserSettingId = $setting.id
-        Save-CpcState
     }
     $target = @{ '@odata.type' = '#microsoft.graph.cloudPcManagementGroupAssignmentTarget'; groupId = $script:S.GroupId }
+    $settingAssigned = $false
     if ($existingGroup) {
         $null = Assert-CpcSelectedGroup $script:S.Config @($script:S.Rows)
         $setting = Invoke-CpcGraph -Path "$script:Endpoint/userSettings/$($script:S.UserSettingId)?`$expand=assignments"
-        if ((Get-Value $setting 'displayName') -ne "Snapshot-$($script:S.PlanId)" -or (Get-Value $setting 'provisioningSourceType') -ne 'snapshot' -or
+        $settingAssignments = @(Get-Value $setting 'assignments' @())
+        if ((Get-Value $setting 'displayName') -ne (Get-CpcOwnedUserSettingName) -or (Get-Value $setting 'provisioningSourceType') -ne 'snapshot' -or $settingAssignments.Count -gt 1 -or
             @((Get-Value $setting 'assignments' @()) | Where-Object { -not (Test-CpcGroupTarget (Get-Value $_ 'target')) -or $_.target.groupId -ne $existingGroup }).Count) {
             throw 'Snapshot setting ownership, snapshot mode or assignment scope changed. Review the setting and use the controlled repair action; refusing to assign an image setting or overwrite unrelated targets.'
         }
+        $settingAssigned = $settingAssignments.Count -eq 1
     }
-    $null = Invoke-CpcGraph -Method POST -Path "$script:Endpoint/userSettings/$($script:S.UserSettingId)/assign" -Body @{ assignments = @(@{ target = $target }) }
+    if (-not $settingAssigned) { $null = Invoke-CpcGraph -Method POST -Path "$script:Endpoint/userSettings/$($script:S.UserSettingId)/assign" -Body @{ assignments = @(@{ target = $target }) } }
     if ($existingGroup) {
         foreach ($row in $Rows) { $row.Phase = 'IdentityPrepared'; $row.Readiness = 'NotChecked' }
         Save-CpcState
@@ -1199,7 +1275,7 @@ function Repair-CpcSnapshotAssignments {
     }
     $settingPath = "$script:Endpoint/userSettings/$settingId"
     $setting = Invoke-CpcGraph -Path "$settingPath`?`$expand=assignments"
-    if ((Get-Value $setting 'displayName') -ne "Snapshot-$($script:S.PlanId)") { throw 'Snapshot user setting ownership mismatch; no repair performed.' }
+    if ((Get-Value $setting 'displayName') -ne (Get-CpcOwnedUserSettingName)) { throw 'Snapshot user setting ownership mismatch; no repair performed.' }
     $settingAssignments = @(Get-Value $setting 'assignments' @())
     if (@($settingAssignments | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -ne $groupId }).Count) {
         throw 'Snapshot setting has unrelated/unknown assignment targets. Review those manually; repair will not remove or affect them.'
@@ -1228,6 +1304,22 @@ function Repair-CpcSnapshotAssignments {
         foreach ($object in @($policies | Where-Object { $_.id -ne $script:S.Config.PolicyId }) + @($settings | Where-Object { $_.id -ne $settingId })) {
             if (@(@(Get-Value $object 'assignments' @()) | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -in $groups }).Count) { throw 'Conflicting policy/user setting would apply to a batch user; resolve it in Intune before repair.' }
         }
+    }
+    $settingHealthy = (Get-Value $setting 'provisioningSourceType') -eq 'snapshot' -and $settingAssignments.Count -eq 1 -and
+        (Test-CpcGroupTarget (Get-Value $settingAssignments[0] 'target')) -and
+        (Get-Value (Get-Value $settingAssignments[0] 'target') 'groupId') -eq $groupId
+    $policyHealthy = $existingGroup -or @((Get-Value $chosen[0] 'assignments' @()) | Where-Object {
+        (Test-CpcGroupTarget (Get-Value $_ 'target')) -and (Get-Value (Get-Value $_ 'target') 'groupId') -eq $groupId
+    }).Count -eq 1
+    $membersHealthy = $existingGroup -or @($batchIds | Where-Object { $_ -notin @($members | ForEach-Object { Get-Value $_ 'id' }) }).Count -eq 0
+    if ($settingHealthy -and $policyHealthy -and $membersHealthy) {
+        for ($i = $script:S.Checks.Count - 1; $i -ge 0; $i--) {
+            if ($script:S.Checks[$i].Check -eq 'Snapshot setting repair') { $script:S.Checks.RemoveAt($i) }
+        }
+        Add-CpcCheck 'Batch' 'Snapshot setting repair' 'Pass' "No repair required. Setting $settingId is already in snapshot mode and the required group assignment state is correct. No Graph write was submitted."
+        Save-CpcState
+        Write-CpcLog 'Snapshot setting repair checked live state: configuration is already correct; no Graph write submitted.'
+        return
     }
     $script:S.Preflight.Clear()
     $script:S.Checks.Clear()
@@ -1681,15 +1773,34 @@ function Remove-CpcAttemptArtifacts($Row, [string]$PendingPhase) {
     }
 }
 
+function Test-CpcAbandonedDraftReset($Row) {
+    if ($Row.Phase -ne 'Abandoned' -or $script:S.GroupId -or $script:S.UserSettingId) { return $false }
+    $activeKeys = @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','SourceVmUniqueId','SourceDiskId','CaptureStartedUtc','ImportId','ImportStatus','ImportStartedUtc','ExportExpiresUtc','ImportSasExpiresUtc','LicenseAssignedUtc','CloudPcId')
+    foreach ($key in $activeKeys) { if (Get-Value $Row $key) { return $false } }
+    $historyKeys = @('SnapshotId','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStartedUtc')
+    foreach ($attempt in @(Get-Value $Row 'AttemptHistory' @())) {
+        foreach ($key in $historyKeys) { if (Get-Value $attempt $key) { return $false } }
+    }
+    return $true
+}
+
 function Reset-CpcCapture($Rows, [switch]$Abandon) {
     Assert-CpcContext
     Assert-CpcConfig
     foreach ($row in $Rows) {
         Assert-CpcContinue
+        $reopenDraft = -not $Abandon -and (Test-CpcAbandonedDraftReset $row)
+        if ($row.Phase -eq 'Abandoned' -and -not $reopenDraft) { throw 'An abandoned plan can be reset only when it never owned a group/user setting and has no current or historical artifact evidence.' }
         $allowed = @('Mapped','IdentityPrepared','Capturing','CaptureFailed','Copying','CopyFailed','Staged','Purged') + $(if ($Abandon) { @('Abandoning') } else { @('ResettingCapture') })
-        if ($row.Phase -notin $allowed -or $row.LicenseAssignedUtc -or ($row.ImportId -and $row.Phase -notin @('Purged','ResettingCapture','Abandoning'))) { throw 'Reset/abandon requires a known pre-license phase and no live/unknown import. Purge a terminal unused import first. Resume an interrupted reset/abandon with the same action.' }
+        if ((-not $reopenDraft -and $row.Phase -notin $allowed) -or $row.LicenseAssignedUtc -or ($row.ImportId -and $row.Phase -notin @('Purged','ResettingCapture','Abandoning'))) { throw 'Reset/abandon requires a known pre-license phase and no live/unknown import. Purge a terminal unused import first. Resume an interrupted reset/abandon with the same action.' }
         if ($row.Phase -in @('ResettingCapture','Abandoning') -and -not (Get-Value $row 'ArtifactRemovalApproved')) { throw 'Interrupted recovery requires prior artifact-removal approval; live/unknown imports cannot bypass recovery validation.' }
         Assert-CpcNoProvisioning $row
+        if ($reopenDraft) {
+            $row.LastError = ''; $row.Readiness = 'NotChecked'; $row.Attested = $false; $script:S.Preflight.Remove($row.VmId)
+            $row.Phase = 'Mapped'
+            Save-CpcState
+            continue
+        }
         Remove-CpcAttemptArtifacts $row $(if ($Abandon) { 'Abandoning' } else { 'ResettingCapture' })
         $history = @{}; foreach ($key in @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStatus','CaptureStartedUtc','ImportStartedUtc')) { $history[$key] = Get-Value $row $key }
         $history.ClosedUtc = [datetime]::UtcNow.ToString('o')
@@ -1699,7 +1810,9 @@ function Reset-CpcCapture($Rows, [switch]$Abandon) {
         $row.Phase = if ($Abandon) { 'Abandoned' } elseif ($script:S.GroupId -and $script:S.UserSettingId) { 'IdentityPrepared' } else { 'Mapped' }
         Save-CpcState
     }
-    Write-CpcLog 'Owned terminal artifacts removed; attempt IDs retained in history. No source restart/deletion, license or policy change. For a retry, obtain fresh guest evidence as needed, attest and validate again. Abandoned users retain the group setting until the whole batch can use Revert to image.'
+    $script:S.Checks.Clear()
+    Save-CpcState
+    Write-CpcLog 'Recovery completed. Owned terminal artifacts, if recorded, were removed and attempt IDs retained in history. An artifact-free unprepared abandoned draft may be reopened to Mapped. No source restart/deletion, license or policy change. For a retry, correct the group scope, obtain fresh guest evidence as needed, attest and validate again.'
 }
 
 function Remove-CpcStaging($Rows) {
@@ -1829,7 +1942,7 @@ function Invoke-CpcOperation {
                 }
                 foreach ($r in @($script:S.Rows | Where-Object Phase -EQ 'Abandoned')) { Assert-CpcNoProvisioning $r }
                 $setting = Invoke-CpcGraph -Path "$script:Endpoint/userSettings/$($script:S.UserSettingId)?`$expand=assignments"
-                if ($setting.displayName -ne ('Snapshot-' + $script:S.PlanId)) { throw 'User setting ownership mismatch.' }
+                if ($setting.displayName -ne (Get-CpcOwnedUserSettingName)) { throw 'User setting ownership mismatch.' }
                 $assignments = @(Get-Value $setting 'assignments' @())
                 if ($assignments.Count -ne 1 -or -not (Test-CpcGroupTarget (Get-Value $assignments[0] 'target')) -or (Get-Value (Get-Value $assignments[0] 'target') 'groupId') -ne $script:S.GroupId) { throw 'Dedicated user setting assignments changed. Manual review required.' }
                 $members = @(Get-CpcGraphCollection "/v1.0/groups/$($script:S.GroupId)/members?`$select=id")
@@ -1844,7 +1957,7 @@ function Invoke-CpcOperation {
                 $verified = Invoke-CpcGraph -Path "$script:Endpoint/userSettings/$($script:S.UserSettingId)?`$expand=assignments"
                 $targets = @(Get-Value $verified 'assignments' @())
                 if ((Get-Value $verified 'id') -ne $script:S.UserSettingId -or
-                    (Get-Value $verified 'displayName') -ne ('Snapshot-' + $script:S.PlanId) -or
+                    (Get-Value $verified 'displayName') -ne (Get-CpcOwnedUserSettingName) -or
                     (Get-Value $verified 'provisioningSourceType') -ne 'image' -or
                     $targets.Count -ne 1 -or -not (Test-CpcGroupTarget (Get-Value $targets[0] 'target')) -or
                     (Get-Value (Get-Value $targets[0] 'target') 'groupId') -ne $script:S.GroupId) {

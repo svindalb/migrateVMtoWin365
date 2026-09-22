@@ -457,8 +457,9 @@ $script:OperationTick = {
                 if ($job.Action -eq 'Connect' -and -not $failureText) { Show-ResumeReminder }
                 if ($hasReview) {
                     $checks = $script:Last.Checks | Format-Table VM,Check,Status,Detail -Wrap | Out-String -Width 150
+                    $evidence = if ($job.Action -in @('ResetCapture','Abandon') -and -not $script:Last.Checks.Count) { 'CURRENT RECOVERY CHECKS: none. Historical prerequisite results were cleared after the recovery action completed.' } else { "PREREQUISITE EVIDENCE:`r`n$checks" }
                     $resultText = "OPERATION RETURNED: $($job.Action). This is not a success declaration. Review phases, failures, IDs and validation results below. Import/provisioning may still be running.`r`nOPERATION ERROR: $($script:Last.OperationError)`r`n`r`n" +
-                        (Get-OperationReview $job.Action) + "`r`nPREREQUISITE EVIDENCE:`r`n$checks"
+                        (Get-OperationReview $job.Action) + "`r`n$evidence"
                     Show-CpcReviewDialog $window $resultText "Result: $($job.Action)" -InformationOnly -Checks $script:Last.Checks -OperationError $failureText | Out-Null
                 }
             }
@@ -556,7 +557,10 @@ This records operator evidence, not an automated test result. Confirm only after
 $ui.CheckButton.Add_Click({ Start-Operation 'Check'; $ui.Tabs.SelectedIndex = 3 })
 $ui.RepairSnapshotButton.Add_Click({ Start-Operation 'RepairSnapshot' })
 $ui.PrepareButton.Add_Click({
-    $message = if ($script:Last -and $script:Last.Config.ExistingGroupId) { 'Create a dedicated snapshot user setting and assign it to the explicitly selected existing group? This affects EVERY member of that group; every member must be mapped and all batch rows selected. Existing group membership and Enterprise policy assignment are not changed. Resolve conflicting settings first and use an exclusive administration window. No license is assigned.' } else { 'Legacy plan: create a dedicated security group and snapshot user setting, add selected users and append the group to the policy preserving existing targets. Requires an exclusive administration window. No license is assigned.' }
+    $message = if ($script:Last -and $script:Last.Config.ExistingGroupId) {
+        if ($script:Last.Config.ReusableUserSettingId) { "Reuse group setting $($script:Last.Config.ReusableUserSettingName) [$($script:Last.Config.ReusableUserSettingId)] and ensure provisioningSourceType=snapshot? Current source is $($script:Last.Config.ReusableUserSettingSource). This affects EVERY member of the group. Confirm the previous migration is complete or safely abandoned and its original journal is intentionally unavailable; an orphan snapshot setting may represent unfinished work. No new setting, group membership, policy assignment or license is created." }
+        else { 'Create a dedicated snapshot user setting and assign it to the explicitly selected existing group? This affects EVERY member of that group; every member must be mapped and all batch rows selected. Existing group membership and Enterprise policy assignment are not changed. Resolve conflicting settings first and use an exclusive administration window. No license is assigned.' }
+    } else { 'Legacy plan: create a dedicated security group and snapshot user setting, add selected users and append the group to the policy preserving existing targets. Requires an exclusive administration window. No license is assigned.' }
     if (Confirm-Change $message) { Start-Operation 'Prepare' }
 })
 $ui.CaptureButton.Add_Click({

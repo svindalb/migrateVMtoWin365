@@ -35,6 +35,17 @@ function Test-WorkflowApproval($State, $Row, [string]$Stage, [datetimeoffset]$No
     } catch { return $false }
 }
 
+function Test-WorkflowAbandonedDraftReset($State, $Row) {
+    if ((Get-WorkflowValue $Row 'Phase') -ne 'Abandoned' -or (Get-WorkflowValue $State 'GroupId') -or (Get-WorkflowValue $State 'UserSettingId')) { return $false }
+    $activeKeys = @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','SourceVmUniqueId','SourceDiskId','CaptureStartedUtc','ImportId','ImportStartedUtc','LicenseAssignedUtc','CloudPcId')
+    foreach ($key in $activeKeys) { if (Get-WorkflowValue $Row $key) { return $false } }
+    $historyKeys = @('SnapshotId','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStartedUtc')
+    foreach ($attempt in @(Get-WorkflowValue $Row 'AttemptHistory' @())) {
+        foreach ($key in $historyKeys) { if (Get-WorkflowValue $attempt $key) { return $false } }
+    }
+    return $true
+}
+
 function Get-CpcActionAvailability {
     param([string]$Action, $State, [object[]]$Rows = @(), [bool]$Busy = $false, [datetimeoffset]$Now = [datetimeoffset]::UtcNow, $Data = $null)
     $reason = ''
@@ -53,6 +64,9 @@ function Get-CpcActionAvailability {
     else {
         if ($Action -in @('RepairSnapshot','UseImage')) { $rowsToCheck = $all }
         if (-not $rowsToCheck.Count) { $reason = 'Check Use for one or more migration rows. Actions apply to checked rows, not just the highlighted row.' }
+        elseif ($Action -eq 'UseImage' -and -not (Get-WorkflowValue $State 'UserSettingId')) { $reason = 'This plan never created or owned a snapshot user setting. Use images cannot modify a setting left by another plan; review that assignment in Intune, then start a fresh plan.' }
+        elseif ($Action -eq 'Abandon' -and @($rowsToCheck | Where-Object { (Get-WorkflowValue $_ 'Phase') -eq 'Abandoned' }).Count) { $reason = 'This attempt is already abandoned.' }
+        elseif ($Action -eq 'ResetCapture' -and @($rowsToCheck | Where-Object { (Get-WorkflowValue $_ 'Phase') -eq 'Abandoned' -and -not (Test-WorkflowAbandonedDraftReset $State $_) }).Count) { $reason = 'An abandoned plan can be reopened only when it never owned a group/user setting and has no current or historical artifact evidence.' }
         elseif ($Action -ne 'Refresh' -and @($rowsToCheck | Where-Object { (Get-WorkflowValue $_ 'VmId') -in @(Get-WorkflowValue $State 'ResumePendingVmIds' @()) }).Count) { $reason = 'Journal restored: Refresh status for these rows first. Resolve any refresh errors before continuing; saved phases are not live confirmation.' }
         elseif ($Action -in @('ReconcileImport','ReconcileLicense') -and $rowsToCheck.Count -ne 1) { $reason = 'Select exactly one row for reconciliation.' }
         elseif ($Action -eq 'Prepare' -and (Get-WorkflowValue (Get-WorkflowValue $State 'Config') 'ExistingGroupId') -and $rowsToCheck.Count -ne $all.Count) { $reason = 'Prepare changes a group-wide setting. Select every row in the batch and validate together.' }
@@ -79,7 +93,8 @@ function Get-CpcActionAvailability {
                     'UseImage' { (Get-WorkflowValue $State 'UserSettingId') -and $phase -in @('Validated','Cleaned','Abandoned') }
                     { $_ -in @('ResetCapture','Abandon') } {
                         $replay = if ($Action -eq 'Abandon') { 'Abandoning' } else { 'ResettingCapture' }
-                        $phase -in (@('Mapped','IdentityPrepared','Capturing','CaptureFailed','Copying','CopyFailed','Staged','Purged') + $replay) -and
+                        ($phase -in (@('Mapped','IdentityPrepared','Capturing','CaptureFailed','Copying','CopyFailed','Staged','Purged') + $replay) -or
+                            ($Action -eq 'ResetCapture' -and (Test-WorkflowAbandonedDraftReset $State $row))) -and
                             -not (Get-WorkflowValue $row 'LicenseAssignedUtc') -and
                             (-not (Get-WorkflowValue $row 'ImportId') -or $phase -in @('Purged',$replay)) -and
                             ($phase -ne $replay -or (Get-WorkflowValue $row 'ArtifactRemovalApproved' $false))
@@ -152,7 +167,12 @@ function Get-CpcWorkflowHint {
                 { $_ -in @('CopyFailed','Purged') } { 'Review the failure/closed import, then use Reset failed / purged capture or Abandon. No direct import or new capture until recovery completes.' }
                 'ResettingCapture' { 'Resume Reset failed / purged capture to finish the previously approved recovery.' }
                 'Abandoning' { 'Resume Abandon to finish the previously approved recovery.' }
-                { $_ -in @('Cleaned','Abandoned') } { 'No further migration step for this row. Use images for future reprovision only when the entire batch is complete or abandoned.' }
+                'Cleaned' { 'No further migration step for this row. Use images for future reprovision only when this plan owns the setting and the entire batch is complete.' }
+                'Abandoned' {
+                    if (Get-WorkflowValue $State 'UserSettingId') { 'This attempt is closed. Use images for future reprovision only when the entire batch is complete or abandoned.' }
+                    elseif (Test-WorkflowAbandonedDraftReset $State $row) { 'This artifact-free draft owns no user setting. Reset it to Mapped, then correct its group scope; the prior plan setting still requires separate Intune review.' }
+                    else { 'This attempt is closed and owns no user setting. Resolve the prior plan setting assignment in Intune, then start a fresh plan; this journal cannot modify it.' }
+                }
                 default { 'Unknown stage: stop and review the journal/version. No forward migration action is enabled.' }
             }
         }
