@@ -2,7 +2,7 @@
 
 ## What is this tool?
 
-The **Azure VM → Windows 365 Migration Workbench** is a Windows desktop tool for migrating a supported Azure VM's Windows environment to a Windows 365 Cloud PC. It connects directly to Azure and Microsoft Graph. **No MCP server or hosted backend is required.**
+The **Azure VM → Windows 365 Migration Workbench** is a Windows desktop tool for migrating a supported Azure VM's Windows environment to a Windows 365 Cloud PC. It connects directly to Azure and Microsoft Graph.
 
 The tool guides an administrator through selecting a source VM and target user, checking prerequisites, stopping and capturing the VM, importing its snapshot, assigning a license, monitoring provisioning, recording user acceptance and cleaning up owned staging artifacts.
 
