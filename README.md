@@ -275,20 +275,5 @@ SAS URLs are not written to journals/reports. Graph response URL query strings a
 
 The app intentionally keeps the selected group, policy assignment and plan-owned user setting. **Do not remove users from that group just to remove the snapshot flag**: it also carries their provisioning policy. Use the whole-batch `image` setting change, or independently establish the intended steady-state policy before restructuring groups. The image-setting change is blocked if the existing group's membership expands beyond this batch.
 
-## Offline validation
-
-```powershell
-pwsh -NoProfile -File .\tests\Test-Offline.ps1
-pwsh -NoProfile -File .\tests\Test-Recovery.ps1
-pwsh -NoProfile -File .\tests\Test-Logging.ps1
-pwsh -NoProfile -File .\tests\Test-Workflow.ps1
-pwsh -NoProfile -STA -File .\tests\Test-Journals.ps1 -Render
-pwsh -NoProfile -STA -File .\Start-CpcMigration.ps1 -SmokeTest
-pwsh -NoProfile -STA -File .\Start-CpcMigration.ps1 -SmokeTest -TenantId "22222222-2222-2222-2222-222222222222"
-```
 
 Tests check PowerShell parsing, import payloads, SAS redaction, RBAC, nullable Azure models, user/source continuity, license gates, explicit-vs-automatic stage approval, UTC expiry, single-use approvals, removed policy assignments and snapshot/copy/VHD/VMGS failure cases. Workflow tests cover forward/recovery action availability across phases, mixed selections, prepared-plan locks and read-only journal discovery. WPF smoke testing renders the license picker, saved guest timestamp and resource-review dialog, including acknowledgement and default-Cancel behavior; it also checks loaded-plan guidance, in-flight button disabling, expiry and click-time guards. **None of these tests certifies live API availability, Azure export permissions, target bootability or end-to-end migration.**
-
-## Research scope
-
-Relevant public product/API/Azure documentation and accessible internal migration references were reviewed on **2026-09-17**. This is not a claim to have enumerated every public/internal document. Public HTTP contracts take precedence over draft schemas or backend service routes. See [project-status/SOURCES.md](project-status/SOURCES.md) for traceable sources and known discrepancies.
