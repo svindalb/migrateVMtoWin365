@@ -34,6 +34,7 @@ Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
 Import-Module (Join-Path $PSScriptRoot 'CpcMigration.Confirmation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CpcMigration.Workflow.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CpcMigration.Journals.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'CpcMigration.Core.psm1')
 $script:Root = $PSScriptRoot
 [xml]$xaml = Get-Content (Join-Path $PSScriptRoot 'CpcMigration.xaml') -Raw
 $window = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new($xaml))
@@ -51,6 +52,7 @@ $script:CompletingJob = $false
 $script:ResumePendingIds = [collections.generic.hashset[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $script:ReconciliationSelectionKey = ''
 $script:ActionControls = @{
+    RestorePersistenceButton = 'RestorePersistence'
     MapButton = 'Map'; LoadButton = 'Load'; ResumeButton = 'Load'
     GuestButton = 'Guest'; AttestButton = 'Attest'; CheckButton = 'Check'; PrepareButton = 'Prepare'
     CaptureButton = 'Capture'; ImportButton = 'Import'; LicenseButton = 'License'; ValidateButton = 'Validate'
@@ -87,6 +89,28 @@ function Invoke-UiModal([scriptblock]$Body) {
 
 function Test-UiIdle {
     return -not ($script:Job -or $script:Busy -or $script:CompletingJob -or $script:ModalDepth)
+}
+
+function New-CpcSaveFileDialog([ValidateSet('Journal','Report')][string]$Kind) {
+    # Never let the working folder, loaded legacy journal or shell history choose
+    # the default destination. Core revalidates the operator's final selection.
+    $directory = Assert-CpcPrivatePath (Get-CpcDataDirectory) -Directory -Create
+    $dialog = [Microsoft.Win32.SaveFileDialog]::new()
+    $dialog.InitialDirectory = $directory
+    $dialog.RestoreDirectory = $true
+    if ($Kind -eq 'Journal') {
+        $dialog.Filter = 'Migration journal (*.json)|*.json'
+        $dialog.FileName = 'migration-plan.json'
+    } else {
+        $dialog.Filter = 'HTML report (*.html)|*.html'
+        $dialog.FileName = 'migration-report.html'
+    }
+    return $dialog
+}
+
+function Show-CpcSaveFileDialog($Dialog) {
+    # Separate native presentation from configuration for offline button tests.
+    return $Dialog.ShowDialog($window)
 }
 
 function Show-CpcReviewDialog($Owner, [string]$Text, [string]$Title = 'Review operation', [switch]$RequirePreflight, [switch]$InformationOnly, $Checks = @(), [string]$OperationError = '') {
@@ -167,7 +191,7 @@ function Update-WorkflowControls {
 
 function Get-LocalResumeCandidates([string[]]$VmIds = @()) {
     if (-not $script:Last) { return @() }
-    $directories = @($script:Root, (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'MigrateLog'))
+    $directories = @((Get-CpcDataDirectory), $script:Root, (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'MigrateLog'))
     if ($script:Last.StatePath) { $directories += [IO.Path]::GetDirectoryName($script:Last.StatePath) }
     # Archiving completed history must not become a way to bypass the prepared
     # plan overlap warning. Keep archives out of ordinary resume reminders.
@@ -191,7 +215,7 @@ function Show-ResumeReminder {
 
 function Show-JournalManager {
     if (-not (Test-UiIdle)) { return }
-    $directories = @($script:Root, (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'MigrateLog'))
+    $directories = @((Get-CpcDataDirectory), $script:Root, (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'MigrateLog'))
     if ($script:Last -and $script:Last.StatePath) { $directories += [IO.Path]::GetDirectoryName($script:Last.StatePath) }
     $tenant = if ($script:RequiredTenantId) { $script:RequiredTenantId } elseif ($script:Last) { $script:Last.TenantId } else { '' }
     $sub = if ($script:Last) { $script:Last.SubscriptionId } else { '' }
@@ -228,7 +252,7 @@ function Set-Working([bool]$Busy) {
 function Get-OperationReview([string]$Action, [hashtable]$Data = @{}) {
     $ids = if ($Data.ContainsKey('VmIds')) { @($Data.VmIds) } else { @(Get-SelectedIds) }
     $rows = @($script:PlanRows | Where-Object { $_.VmId -in $ids })
-    if ($Action -in @('UseImage','RepairSnapshot','Save','Export')) { $rows = @($script:PlanRows) }
+    if ($Action -in @('UseImage','RepairSnapshot','Save','Export','RestorePersistence')) { $rows = @($script:PlanRows) }
     if ($Action -eq 'Map') { $rows = @($script:Inventory | Where-Object Selected) }
     $config = if ($Action -eq 'Map') { $Data.Config } elseif ($script:Last) { $script:Last.Config } else { @{} }
     $catalog = if ($script:Last) { $script:Last.Catalog } else { @{ Policies = @(); Skus = @(); Storage = @(); Subscriptions = @() } }
@@ -260,7 +284,7 @@ function Start-Operation([string]$Action,[hashtable]$Data = @{}, [switch]$Automa
     # Use the validated startup value, never mutable UI text or caller data.
     if ($script:RequiredTenantId) { $Data.RequiredTenantId = $script:RequiredTenantId }
     if ($Action -eq 'Connect' -and -not $ui.SubscriptionPicker.SelectedValue) { Show-Notice 'Detect subscriptions and select one first.'; return }
-    if ($Action -notin @('LocalCheck','Install','DetectSubscriptions','Connect','Save','Export')) {
+    if ($Action -notin @('LocalCheck','Install','DetectSubscriptions','Connect','Save','Export','RestorePersistence')) {
         if (-not $script:Last -or -not $script:Last.Connected -or
             [string]$ui.SubscriptionPicker.SelectedValue -ne $script:Last.SubscriptionId -or $ui.TenantId.Text.Trim() -ne $script:Last.TenantId) {
             Show-Notice 'Connect the selected subscription and tenant first. Changing a picker does not change the active Azure context.'
@@ -370,9 +394,17 @@ function Update-Dashboard {
     }
 }
 
+function Update-PlanRowInspection {
+    $ui.RowJson.Text = if ($null -ne $ui.PlanGrid.SelectedItem) {
+        $ui.PlanGrid.SelectedItem | ConvertTo-Json -Depth 15
+    } else {
+        'Select a row to inspect guest evidence and recorded resource IDs.'
+    }
+}
+
 function Set-OperationResult($Result,[string]$Action) {
     $script:Last = $Result
-    if ($Action -eq 'Load' -and -not $Result.OperationError) {
+    if ($Action -in @('Load','RestorePersistence') -and -not $Result.OperationError) {
         $script:ResumePendingIds.Clear()
         foreach ($row in $Result.Rows) { $null = $script:ResumePendingIds.Add($row.VmId) }
     }
@@ -383,13 +415,20 @@ function Set-OperationResult($Result,[string]$Action) {
     }
     $Result | Add-Member -NotePropertyName ResumePendingVmIds -NotePropertyValue @($script:ResumePendingIds | ForEach-Object { $_ }) -Force
     $selection = @(Get-SelectedIds)
+    # Highlighting inspects one row; it does not select operation targets.
+    # Preserve that identity, never the old worker-result object or row index.
+    $inspectedVmId = [string](Get-Value $ui.PlanGrid.SelectedItem 'VmId')
+    $inspectedRow = $null
     $hadRows = $script:PlanRows.Count -gt 0
     $script:PlanRows.Clear()
     foreach ($row in $Result.Rows) {
         if ($hadRows) { $row.Selected = $row.VmId -in $selection }
         $row | Add-Member -NotePropertyName GuestAssessmentText -NotePropertyValue (Get-CpcGuestAssessmentText $row) -Force
         $script:PlanRows.Add($row)
+        if ($inspectedVmId -and $row.VmId -eq $inspectedVmId) { $inspectedRow = $row }
     }
+    $ui.PlanGrid.SelectedItem = $inspectedRow
+    Update-PlanRowInspection # Also clear stale text when no row remains selected.
     $ui.CheckGrid.ItemsSource = @($Result.Checks)
     $ui.GraphGrid.ItemsSource = @($Result.GraphResults)
     if ($Action -in @('DetectSubscriptions','Connect','Discover')) {
@@ -585,6 +624,7 @@ $ui.ImportButton.Add_Click({
     if (Confirm-Change 'Import the selected staged VHD/VMGS into Windows 365 via Microsoft Graph beta? Generates read-only 48-hour user-delegation SAS URLs in memory. Staging must remain accessible until import succeeds. Each snapshot belongs to one user; do not reuse it. No license is assigned yet.') { Start-Operation 'Import' }
 })
 $ui.RefreshButton.Add_Click({ Start-Operation 'Refresh' })
+$ui.RestorePersistenceButton.Add_Click({ Start-Operation 'RestorePersistence' })
 $ui.AutoRefresh.Add_Checked({
     if (-not (Show-CpcReviewDialog $window (Get-OperationReview 'Refresh') 'Enable automatic status refresh')) { $ui.AutoRefresh.IsChecked = $false }
 })
@@ -611,19 +651,23 @@ $ui.CancelButton.Add_Click({
     $ui.StatusText.Text = 'Stop requested — waiting for current API call. No rollback; server-side work may continue.'
 })
 $ui.SaveButton.Add_Click({
-    $dialog = [Microsoft.Win32.SaveFileDialog]::new()
-    $dialog.Filter = 'Migration journal (*.json)|*.json'
-    $dialog.FileName = 'migration-plan.json'
-    if (Invoke-UiModal { $dialog.ShowDialog($window) }) { Start-Operation 'Save' @{ Path = $dialog.FileName } }
+    if (-not (Test-UiIdle)) { return }
+    try {
+        $dialog = New-CpcSaveFileDialog 'Journal'
+        $selected = Invoke-UiModal { Show-CpcSaveFileDialog $dialog }
+    } catch { Show-Notice ('Cannot open the private journal save picker. No destination fallback or save was performed. ' + (Protect-CpcText $_.Exception.Message)); return }
+    if ($selected) { Start-Operation 'Save' @{ Path = $dialog.FileName } }
 })
 $ui.LoadButton.Add_Click({ Show-JournalManager })
 $ui.ResumeButton.Add_Click({ Show-JournalManager })
 $ui.JournalManagerButton.Add_Click({ Show-JournalManager })
 $ui.ExportButton.Add_Click({
-    $dialog = [Microsoft.Win32.SaveFileDialog]::new()
-    $dialog.Filter = 'HTML report (*.html)|*.html'
-    $dialog.FileName = 'migration-report.html'
-    if (Invoke-UiModal { $dialog.ShowDialog($window) }) { Start-Operation 'Export' @{ Directory = [IO.Path]::GetDirectoryName($dialog.FileName) } }
+    if (-not (Test-UiIdle)) { return }
+    try {
+        $dialog = New-CpcSaveFileDialog 'Report'
+        $selected = Invoke-UiModal { Show-CpcSaveFileDialog $dialog }
+    } catch { Show-Notice ('Cannot open the private report save picker. No destination fallback or export was performed. ' + (Protect-CpcText $_.Exception.Message)); return }
+    if ($selected) { Start-Operation 'Export' @{ Directory = [IO.Path]::GetDirectoryName($dialog.FileName) } }
 })
 $ui.ReconcileButton.Add_Click({
     Start-Operation 'ReconcileImport' @{ ImportId = $ui.ImportId.Text.Trim() }
@@ -635,9 +679,7 @@ $ui.GraphGrid.Add_SelectionChanged({
     if ($ui.GraphGrid.SelectedItem) { $ui.GraphJson.Text = $ui.GraphGrid.SelectedItem.Result }
 })
 $ui.PlanGrid.Add_SelectionChanged({
-    if ($ui.PlanGrid.SelectedItem) {
-        $ui.RowJson.Text = $ui.PlanGrid.SelectedItem | ConvertTo-Json -Depth 15
-    }
+    Update-PlanRowInspection
 })
 $ui.SearchBox.Add_TextChanged({ Update-VmFilter })
 $ui.DocsButton.Add_Click({ Start-Process 'https://learn.microsoft.com/en-us/windows-365/enterprise/migration-to-windows365' })
@@ -654,7 +696,7 @@ try {
     # Initialize before any sign-in or user operation. Smoke tests use an isolated
     # temporary folder and still exercise real automatic log/journal creation.
     $script:SmokeLogFolder = ''
-    $loggingFolder = $PSScriptRoot
+    $loggingFolder = '' # Core selects private per-user LocalAppData; no Documents fallback.
     if ($SmokeTest) { $script:SmokeLogFolder = Join-Path ([IO.Path]::GetTempPath()) ('cpcm-ui-log-' + [guid]::NewGuid().ToString('N')); $loggingFolder = $script:SmokeLogFolder }
     $startup = [powershell]::Create()
     $startup.Runspace = $runspace
@@ -670,7 +712,6 @@ try {
             if (-not [IO.File]::Exists($loggingResult.LogPath) -or -not [IO.File]::Exists($loggingResult.StatePath)) { throw 'Startup did not automatically create log and journal.' }
         } else {
             Set-OperationResult $loggingResult 'InitializeLogging'
-            if ($loggingResult.LogLocationChanged) { Show-Notice "Log location changed because the script folder is not writable for this session.`n`nLog: $($loggingResult.LogPath)`nJournal: $($loggingResult.StatePath)" }
             $ui.StatusText.Text = "Logging automatically: $($loggingResult.LogPath)"
         }
     } finally { $startup.Dispose() }
@@ -686,6 +727,62 @@ try {
             if ($ui.SubscriptionPicker.IsEnabled -ne (-not $busy) -or $ui.DetectSubscriptionsButton.IsEnabled -ne (-not $busy)) { throw 'Startup tenant must not prevent explicit subscription detection / selection.' }
         }
         if ($script:Job -or $script:Last) { throw 'Startup must not implicitly authenticate or start an operation.' }
+        # Exercise the actual button handlers with real SaveFileDialog objects,
+        # substituting only native presentation/dispatch and an isolated default.
+        # No shell picker is opened and no operational journal/report is written.
+        $dialogFunctions = @{}
+        foreach ($name in @('Get-CpcDataDirectory','Show-CpcSaveFileDialog','Start-Operation','Show-Notice')) { $dialogFunctions[$name] = (Get-Command $name).ScriptBlock }
+        $dialogPriorLast = $script:Last
+        try {
+            if ((Get-CpcDataDirectory) -ne (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CpcMigration/data')) { throw 'Save picker production default is not private AppData.' }
+            $script:DialogDefault = Join-Path $script:SmokeLogFolder 'save-dialog-default'
+            $script:DialogShown = [collections.generic.list[object]]::new()
+            $script:DialogDispatches = [collections.generic.list[object]]::new()
+            $script:DialogNotices = [collections.generic.list[string]]::new()
+            $script:DialogAccept = $false
+            $script:Last = [pscustomobject]@{ StatePath = (Join-Path $script:Root 'legacy-journal-fixture.json') }
+            $legacyFixturePath = $script:Last.StatePath # Reference only; never opened or created.
+            function script:Get-CpcDataDirectory { return $script:DialogDefault }
+            function script:Show-CpcSaveFileDialog($Dialog) {
+                if ($script:ModalDepth -ne 1 -or (Test-UiIdle)) { throw 'Save picker must pause dispatch inside the modal guard.' }
+                if ($Dialog -isnot [Microsoft.Win32.SaveFileDialog] -or $Dialog.InitialDirectory -ne $script:DialogDefault -or -not $Dialog.RestoreDirectory) { throw 'Save picker omitted the private initial directory/restore setting.' }
+                $script:DialogShown.Add(@{ InitialDirectory = $Dialog.InitialDirectory; FileName = $Dialog.FileName; Filter = $Dialog.Filter })
+                $extension = if ($Dialog.FileName -eq 'migration-plan.json') { '.json' } else { '.html' }
+                if ($script:DialogAccept) { $Dialog.FileName = Join-Path $script:DialogDefault ('selected' + $extension) }
+                return $script:DialogAccept
+            }
+            function script:Start-Operation([string]$Action, [hashtable]$Data = @{}, [switch]$Automatic) {
+                if ($script:ModalDepth -ne 0) { throw 'Save dispatch ran before the picker closed.' }
+                $script:DialogDispatches.Add(@{ Action = $Action; Data = $Data })
+            }
+            function script:Show-Notice([string]$Text) { $script:DialogNotices.Add($Text) }
+            foreach ($button in @('SaveButton','ExportButton')) { $ui[$button].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Primitives.ButtonBase]::ClickEvent)) }
+            if ($script:DialogShown.Count -ne 2 -or $script:DialogDispatches.Count -or $script:DialogNotices.Count -or $script:Last.StatePath -ne $legacyFixturePath) { throw 'Cancel must leave the active journal unchanged without dispatch or fallback.' }
+            if ($script:DialogShown[0].FileName -ne 'migration-plan.json' -or $script:DialogShown[0].Filter -ne 'Migration journal (*.json)|*.json' -or
+                $script:DialogShown[1].FileName -ne 'migration-report.html' -or $script:DialogShown[1].Filter -ne 'HTML report (*.html)|*.html') { throw 'Save/report picker names or filters changed.' }
+            $null = Assert-CpcPrivatePath $script:DialogDefault -Directory
+            $script:DialogAccept = $true
+            foreach ($button in @('SaveButton','ExportButton')) { $ui[$button].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Primitives.ButtonBase]::ClickEvent)) }
+            if ($script:DialogShown.Count -ne 4 -or $script:DialogNotices.Count -or $script:DialogDispatches.Count -ne 2 -or
+                $script:DialogDispatches[0].Action -ne 'Save' -or $script:DialogDispatches[0].Data.Path -ne (Join-Path $script:DialogDefault 'selected.json') -or
+                $script:DialogDispatches[1].Action -ne 'Export' -or $script:DialogDispatches[1].Data.Directory -ne $script:DialogDefault) { throw 'Picker did not pass the explicit selection to the normal guarded operation.' }
+            if (@(Get-ChildItem -LiteralPath $script:DialogDefault -File).Count) { throw 'Dialog configuration/dispatch probe wrote a journal or report.' }
+            $script:Busy = $true
+            foreach ($button in @('SaveButton','ExportButton')) { $ui[$button].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Primitives.ButtonBase]::ClickEvent)) }
+            $script:Busy = $false
+            if ($script:DialogShown.Count -ne 4 -or $script:DialogDispatches.Count -ne 2 -or $script:DialogNotices.Count) { throw 'Busy state opened a save picker or dispatched an operation.' }
+            $script:DialogDefault = Join-Path $script:SmokeLogFolder 'save-dialog-blocker'
+            [IO.File]::WriteAllText($script:DialogDefault, 'retain-fixture')
+            foreach ($button in @('SaveButton','ExportButton')) { $ui[$button].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Primitives.ButtonBase]::ClickEvent)) }
+            if ($script:DialogShown.Count -ne 4 -or $script:DialogDispatches.Count -ne 2 -or $script:DialogNotices.Count -ne 2 -or
+                @($script:DialogNotices | Where-Object { $_ -notmatch 'No destination fallback' }).Count -or
+                [IO.File]::ReadAllText($script:DialogDefault) -ne 'retain-fixture' -or $script:Last.StatePath -ne $legacyFixturePath) { throw 'Unavailable private directory did not fail closed before presentation/dispatch.' }
+            if ($script:ModalDepth -ne 0) { throw 'Save picker left modal guard active.' }
+        } finally {
+            foreach ($name in $dialogFunctions.Keys) { Set-Item "Function:script:$name" $dialogFunctions[$name] }
+            $script:Last = $dialogPriorLast; $script:Busy = $false
+        }
+        'PASS: Save/report button defaults, cancel/selection, busy and unavailable-directory checks; native pickers not displayed.'
         $caughtError = 'A command that prompts the user failed because the host does not support user interaction.'
         foreach ($hadErrors in @($true,$false)) {
             if ((Get-OperationFailureText @{ OperationError = $caughtError } @() $hadErrors) -ne $caughtError) { throw 'Caught operation error was lost when the worker error stream was empty.' }
@@ -806,6 +903,54 @@ try {
                 if ($ui.TenantId.Text -ne $expectedTenant -or $ui.TenantId.IsEnabled) { throw 'Rendered tenant value / plan scope lock is incorrect.' }
                 if ($ui.CheckButton.ToolTip -notmatch 'saved guest assessment' -or $ui.GuestButton.ToolTip -notmatch 'Repeat after guest fixes') { throw 'Guest refresh guidance must be available on the workflow controls.' }
                 if (@($ui.PlanGrid.Columns | Where-Object Header -EQ 'Guest assessed (recorded)').Count -ne 1) { throw 'Migration grid must distinguish guest collection time from validation time.' }
+                # Exercise real selection events and fresh result objects. The
+                # inspected row is independent of the Use operation checkboxes.
+                $inspectionFixture = $fixture.PSObject.Copy()
+                $inspectionFixture.Rows = @(
+                    [pscustomobject]@{ Selected = $true; VmId = 'inspect-a'; VM = 'SAME-NAME'; UserPrincipalName = 'first@example.invalid'; Phase = 'Mapped'; Readiness = 'NotChecked'; ImportStatus = ''; CloudPcId = ''; CloudPcStatus = ''; CloudPcName = ''; LastError = ''; StatusRefreshSucceeded = $false },
+                    [pscustomobject]@{ Selected = $false; VmId = 'inspect-b'; VM = 'SAME-NAME'; UserPrincipalName = 'second@example.invalid'; Phase = 'Mapped'; Readiness = 'NotChecked'; ImportStatus = ''; CloudPcId = '88888888-8888-8888-8888-888888888888'; CloudPcStatus = 'deprovisioning'; CloudPcName = 'old-pc'; LastError = ''; StatusRefreshSucceeded = $false }
+                )
+                Set-OperationResult $inspectionFixture 'Refresh'
+                $script:PlanRows[0].Selected = $true; $script:PlanRows[1].Selected = $false
+                $ui.Tabs.SelectedIndex = 2; $ui.PlanGrid.UpdateLayout()
+                $ui.PlanGrid.SelectedItem = $script:PlanRows[1]
+                $oldInspection = $ui.RowJson.Text | ConvertFrom-Json
+                if ($oldInspection.VmId -ne 'inspect-b' -or $oldInspection.CloudPcStatus -ne 'deprovisioning') { throw 'Selection did not serialize the inspected fixture.' }
+                $newInspectionFixture = $inspectionFixture.PSObject.Copy()
+                $newInspectionFixture.Rows = @($inspectionFixture.Rows[1].PSObject.Copy(), $inspectionFixture.Rows[0].PSObject.Copy())
+                $newInspectionFixture.Rows[0].CloudPcId = ''; $newInspectionFixture.Rows[0].CloudPcStatus = ''; $newInspectionFixture.Rows[0].CloudPcName = ''
+                $newInspectionFixture.Rows[0].StatusRefreshSucceeded = $true
+                # Deliberately contrary worker flags: UI Use choices must win,
+                # and highlighting must never select an operation target.
+                $newInspectionFixture.Rows[0].Selected = $true; $newInspectionFixture.Rows[1].Selected = $false
+                Set-OperationResult $newInspectionFixture 'Refresh'
+                $newInspection = $ui.RowJson.Text | ConvertFrom-Json
+                if ($newInspection.VmId -ne 'inspect-b' -or $newInspection.CloudPcId -or $newInspection.CloudPcStatus -or $newInspection.CloudPcName -or -not $newInspection.StatusRefreshSucceeded) { throw 'Refresh left stale Cloud PC identity/status in the row JSON pane.' }
+                if (-not [object]::ReferenceEquals($ui.PlanGrid.SelectedItem, $script:PlanRows[0]) -or [object]::ReferenceEquals($ui.PlanGrid.SelectedItem, $inspectionFixture.Rows[1])) { throw 'Inspection must follow VM ID to the fresh row object, not the old object/index/name.' }
+                if ($script:PlanRows[0].Selected -or -not $script:PlanRows[1].Selected -or (@(Get-SelectedIds) -join ',') -ne 'inspect-a') { throw 'Restoring inspection changed Use operation targets.' }
+                $statusColumn = @($ui.PlanGrid.Columns | Where-Object Header -EQ 'Cloud PC')[0]
+                $ui.PlanGrid.ScrollIntoView($script:PlanRows[0], $statusColumn); $ui.PlanGrid.UpdateLayout()
+                $statusCell = $statusColumn.GetCellContent($script:PlanRows[0])
+                if (-not $statusCell -or $statusCell.Text) { throw 'Rendered Cloud PC cell and cleared row JSON disagree.' }
+                $failedInspectionFixture = $newInspectionFixture.PSObject.Copy()
+                $failedInspectionFixture.Rows = @($newInspectionFixture.Rows | ForEach-Object { $_.PSObject.Copy() })
+                $failedInspectionFixture.Rows[0].StatusRefreshSucceeded = $false; $failedInspectionFixture.Rows[0].LastError = 'offline refresh failure'
+                Set-OperationResult $failedInspectionFixture 'Refresh'
+                $failedInspection = $ui.RowJson.Text | ConvertFrom-Json
+                if ($failedInspection.StatusRefreshSucceeded -or $failedInspection.LastError -ne 'offline refresh failure') { throw 'Failed-refresh details remained on an earlier successful snapshot.' }
+                $ui.PlanGrid.SelectedItem = $null
+                if ($ui.RowJson.Text -ne 'Select a row to inspect guest evidence and recorded resource IDs.') { throw 'Deselecting a row must clear the inspection JSON.' }
+                $ui.PlanGrid.SelectedItem = $script:PlanRows[0]
+                $removedInspectionFixture = $failedInspectionFixture.PSObject.Copy()
+                $removedInspectionFixture.Rows = @($failedInspectionFixture.Rows[1].PSObject.Copy())
+                Set-OperationResult $removedInspectionFixture 'Map'
+                if ($ui.PlanGrid.SelectedItem -or $ui.RowJson.Text -ne 'Select a row to inspect guest evidence and recorded resource IDs.') { throw 'Removed row left stale JSON or selected another VM with the same name.' }
+                $ui.PlanGrid.SelectedItem = $script:PlanRows[0]
+                $removedInspectionFixture.Rows = @()
+                Set-OperationResult $removedInspectionFixture 'Refresh'
+                if ($ui.PlanGrid.SelectedItem -or $ui.RowJson.Text -ne 'Select a row to inspect guest evidence and recorded resource IDs.') { throw 'Empty result left stale row JSON.' }
+                Set-OperationResult $fixture 'RefreshLicenses'
+                Write-Host 'PASS: Row JSON follows refreshed VM identity, displays current success/error values, clears on deselection/removal and preserves Use targets.'
                 # Exercise actual controls against server-side phases after the
                 # worker returns, not merely busy-state disabling.
                 $fixture.Connected = $true; $fixture.TenantId = $ui.TenantId.Text.Trim()
@@ -833,6 +978,23 @@ try {
                 if (-not $ui.CaptureButton.IsEnabled -or $ui.PrepareButton.IsEnabled) { throw 'Only correct approved major stage should be enabled.' }
                 $fixture.Preflight['fixture'].ExpiresUtc = [datetimeoffset]::UtcNow.AddSeconds(-1).ToString('o'); Update-WorkflowControls
                 if ($ui.CaptureButton.IsEnabled) { throw 'Expired approval must immediately disable capture.' }
+                $fixture | Add-Member -NotePropertyName PersistenceFault -NotePropertyValue 'offline storage failure' -Force
+                $fixture.Connected = $false; $r.Selected = $false; Update-WorkflowControls
+                if (-not $ui.RestorePersistenceButton.IsEnabled -or -not $ui.RestorePersistenceButton.IsVisible -or $ui.RefreshButton.IsEnabled) { throw 'Local restoration must remain visible/reachable without connection or selection while remote work is faulted.' }
+                if ((Get-OperationReview 'RestorePersistence') -notmatch 'OFFLINE-SMOKE') { throw 'Persistence restoration must review the entire plan, including unchecked rows.' }
+                Set-Working $true
+                if ($ui.RestorePersistenceButton.IsEnabled) { throw 'Restoration must not race an active worker.' }
+                Set-Working $false
+                $fixture.PersistenceFault = ''; $fixture.Preflight.Clear(); $fixture.Connected = $true; $r.Selected = $true
+                Set-OperationResult $fixture 'RestorePersistence'
+                if ($ui.RestorePersistenceButton.IsEnabled -or $ui.CheckButton.IsEnabled -or -not $ui.RefreshButton.IsEnabled) { throw 'Successful restoration must require Refresh before revalidation and disable redundant restore.' }
+                Set-OperationResult $fixture 'Refresh'
+                if (-not $ui.CheckButton.IsEnabled) { throw 'Successful post-restoration Refresh must allow explicit revalidation.' }
+                $r | Add-Member -NotePropertyName ImportLookupWarning -NotePropertyValue 'Historical 404 fixture; not proof of consumption.' -Force
+                $warningColumn = @($ui.PlanGrid.Columns | Where-Object Header -EQ 'Import lookup warning')[0]
+                $ui.PlanGrid.ScrollIntoView($script:PlanRows[0], $warningColumn); $ui.PlanGrid.UpdateLayout()
+                $warningCell = $warningColumn.GetCellContent($script:PlanRows[0])
+                if (-not $warningCell -or $warningCell.Text -notmatch 'Historical 404 fixture') { throw 'Historical import warning must be rendered, not hidden as a successful read.' }
                 foreach ($phase in @('Copying','Importing','Provisioning')) {
                     $r.Phase = $phase; Update-WorkflowControls
                     foreach ($name in @('GuestButton','AttestButton','CheckButton','PrepareButton','CaptureButton','ImportButton','LicenseButton','ValidateButton','CleanupButton','RepairSnapshotButton')) {

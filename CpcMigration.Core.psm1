@@ -12,6 +12,10 @@ $script:PlanLease = $null
 $script:LogStream = $null
 $script:LogPath = ''
 $script:LogLocationChanged = $false
+$script:PersistenceFault = ''
+$script:SessionLogLimit = 5MB
+$script:SessionLogArchives = 3
+$script:DiagnosticRecordLimit = 64KB
 $ExecutionContext.SessionState.Module.OnRemove = {
     if ($script:JournalLease) { $script:JournalLease.Stream.Dispose() }
     if ($script:PlanLease) { $script:PlanLease.Stream.Dispose() }
@@ -37,10 +41,62 @@ function Protect-CpcText([string]$Text) {
 
 function Write-CpcSessionRecord([string]$Kind, $Details) {
     if (-not $script:LogStream) { return } # Headless/offline helpers can run without a UI session.
+    try {
+    $null = Assert-CpcPrivatePath $script:LogPath
     $line = Protect-CpcText (@{ Utc = [datetime]::UtcNow.ToString('o'); Kind = $Kind; PlanId = $script:S.PlanId; Details = $Details } | ConvertTo-Json -Depth 40 -Compress)
+    if ([text.encoding]::UTF8.GetByteCount($line) -gt $script:DiagnosticRecordLimit - 1) {
+        $line = @{ Utc = [datetime]::UtcNow.ToString('o'); Kind = $Kind; PlanId = $script:S.PlanId; Details = @{ Omitted = 'Record exceeded diagnostic size limit'; LimitBytes = $script:DiagnosticRecordLimit } } | ConvertTo-Json -Compress
+    }
     $bytes = [text.encoding]::UTF8.GetBytes($line + "`n")
+    if ($script:LogStream.Length + $bytes.Length -gt $script:SessionLogLimit) {
+        $script:LogStream.Dispose()
+        # Rotate only this session's GUID-named files, never other sessions/journals.
+        for ($i = $script:SessionLogArchives - 1; $i -ge 1; $i--) {
+            $null = Assert-CpcPrivatePath "$($script:LogPath).$i"
+            $null = Assert-CpcPrivatePath "$($script:LogPath).$($i + 1)"
+            if ([IO.File]::Exists("$($script:LogPath).$i")) { [IO.File]::Move("$($script:LogPath).$i", "$($script:LogPath).$($i + 1)", $true) }
+        }
+        [IO.File]::Move($script:LogPath, "$($script:LogPath).1", $true)
+        $script:LogStream = [IO.File]::Open($script:LogPath, 'CreateNew', 'Write', 'Read')
+    }
     $script:LogStream.Write($bytes, 0, $bytes.Length)
     $script:LogStream.Flush($true)
+    } catch { Set-CpcPersistenceFault $_.Exception.Message; throw }
+}
+
+function Set-CpcPersistenceFault([string]$Reason) {
+    $script:PersistenceFault = Protect-CpcText $Reason
+    # Keep rejected candidate operations transactional. The fault blocks use of
+    # existing receipts; explicit restoration clears them before re-enabling work.
+}
+
+function Assert-CpcPersistenceReady {
+    if ($script:PersistenceFault) { throw 'Journal/log persistence is faulted. Restore journal writes before further changes; no cloud operation was retried.' }
+    if (-not $script:S.StatePath) { throw 'A durable recovery journal is required before changes.' }
+    try {
+        Save-CpcState
+        Write-CpcAudit 'PersistenceCheckpoint' @{ Outcome = 'Durable' }
+    } catch { Set-CpcPersistenceFault $_.Exception.Message; throw }
+}
+
+function Restore-CpcPersistence {
+    # Explicit local-only recovery, preserving the in-memory outcome of any
+    # already-submitted operation. Never replay a cloud call or restore approvals.
+    if (-not $script:S.StatePath) { throw 'No journal is available. Restart safely and review recovery.' }
+    try {
+        if ($script:LogPath) {
+            $null = Assert-CpcPrivatePath $script:LogPath
+            if (-not [IO.File]::Exists($script:LogPath)) { throw 'Original session log is missing. Restore/review its evidence before recovering this session.' }
+            if ($script:LogStream) { $script:LogStream.Dispose() }
+            $script:LogStream = [IO.File]::Open($script:LogPath, 'Append', 'Write', 'Read')
+        }
+        Save-CpcState
+        Write-CpcAudit 'PersistenceRestored' @{ Outcome = 'Durable'; RequiresReview = $true }
+        if ($script:LogStream) { $script:LogStream.Flush($true) }
+        $script:S.Preflight.Clear()
+        $script:PersistenceFault = ''
+        Write-CpcLog 'Journal/audit writes restored. Review server outcomes and refresh; no cloud operation was replayed. Validate again before any major stage.'
+    } catch { Set-CpcPersistenceFault $_.Exception.Message; throw }
 }
 
 function Get-CpcDocumentsDirectory {
@@ -49,21 +105,65 @@ function Get-CpcDocumentsDirectory {
     return $documents
 }
 
-function Initialize-CpcLogging([string]$PreferredDirectory = $PSScriptRoot) {
+function Get-CpcDataDirectory {
+    $local = [Environment]::GetFolderPath('LocalApplicationData')
+    if (-not $local) { throw 'Windows could not resolve private local application data.' }
+    return Join-Path $local 'CpcMigration/data'
+}
+
+function Assert-CpcPrivatePath([string]$Path, [switch]$Directory, [switch]$Create) {
+    if (-not $IsWindows -or $Path -notmatch '^[A-Za-z]:[\\/]' -or $Path.Substring(2).Contains(':')) { throw 'Private storage requires an absolute local Windows path, not a share, device path or alternate stream.' }
+    $full = [IO.Path]::GetFullPath($Path)
+    if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($full)).DriveType -ne [IO.DriveType]::Fixed) { throw 'Private storage requires a local fixed drive.' }
+    $part = $full
+    while ($part) {
+        if (([IO.Directory]::Exists($part) -or [IO.File]::Exists($part)) -and ([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint)) { throw 'Private storage must not traverse a reparse point, junction, symlink or cloud placeholder.' }
+        $part = [IO.Path]::GetDirectoryName($part)
+    }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $allowed = @($sid.Value, 'S-1-5-18', 'S-1-5-32-544') # Executing user, SYSTEM, local Administrators.
+    if ($Directory -and -not [IO.Directory]::Exists($full)) {
+        if (-not $Create -or [IO.File]::Exists($full)) { throw 'Private directory is missing or is a file.' }
+        $parent = [IO.Path]::GetDirectoryName($full)
+        if (-not $parent) { throw 'Cannot create private storage at the drive root.' }
+        $null = Assert-CpcPrivatePath $parent -Directory -Create
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetOwner($sid); $security.SetAccessRuleProtection($true, $false)
+        foreach ($identity in $allowed) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($identity), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+            $security.AddAccessRule($rule)
+        }
+        [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($full), $security)
+    }
+    if ($Directory) {
+        $acl = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($full))
+    } else {
+        $null = Assert-CpcPrivatePath ([IO.Path]::GetDirectoryName($full)) -Directory -Create:$Create
+        if (-not [IO.File]::Exists($full)) { return $full }
+        $acl = [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]::new($full))
+    }
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { throw 'Private storage owner is not the executing user, SYSTEM or local Administrators. No permissions were changed.' }
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+    if ($null -eq $descriptor.DiscretionaryAcl) { throw 'Private storage cannot have an unrestricted null DACL.' }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) { throw 'Private storage grants access to other principals. Choose an approved private directory; existing permissions are never changed automatically.' }
+    }
+    return $full
+}
+
+function Initialize-CpcLogging([string]$PreferredDirectory = '') {
     if ($script:LogStream) { return }
     if ($script:S.StatePath -or $script:S.Rows.Count) { throw 'Automatic logging must initialize before loading or mapping a plan.' }
     $original = $script:S
-    $primaryError = ''
-    for ($attempt = 0; $attempt -lt 2; $attempt++) {
         $stream = $null
         try {
-            $folder = if ($attempt -eq 0) { [IO.Path]::GetFullPath($PreferredDirectory) } else { Join-Path (Get-CpcDocumentsDirectory) 'MigrateLog' }
-            $null = [IO.Directory]::CreateDirectory($folder)
+            $folder = if ($PreferredDirectory) { $PreferredDirectory } else { Get-CpcDataDirectory }
+            $folder = Assert-CpcPrivatePath $folder -Directory -Create
             $name = 'migration-' + [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N')
             $logPath = Join-Path $folder ($name + '.log')
             $candidate = $original.Clone()
             $candidate.StatePath = Join-Path $folder ($name + '.json')
-            # Real create/write/flush checks as the executing user, not an ACL guess.
+            # Verified restrictive ACLs plus real create/write/flush checks.
             # Unique session files never overwrite another run's log/journal.
             $stream = [IO.File]::Open($logPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
             $header = [text.encoding]::UTF8.GetBytes("Windows 365 migration session log (UTC; redacted). Contains sensitive tenant/user/resource identifiers.`n")
@@ -73,16 +173,14 @@ function Initialize-CpcLogging([string]$PreferredDirectory = $PSScriptRoot) {
             Save-CpcState -State $candidate
             $script:S = $candidate
             $script:LogStream = $stream; $stream = $null
-            $script:LogPath = $logPath; $script:LogLocationChanged = $attempt -eq 1
-            break
+            $script:LogPath = $logPath; $script:LogLocationChanged = $false
+            $script:PersistenceFault = '' # Startup completed before any migration exists.
         } catch {
-            if ($attempt -eq 0) { $primaryError = Protect-CpcText $_.Exception.Message }
-            else { throw ('Cannot initialize log/journal in the script folder or Documents\MigrateLog. No migration started. Script-folder error: ' + $primaryError + '; fallback error: ' + (Protect-CpcText $_.Exception.Message)) }
+            Set-CpcPersistenceFault $_.Exception.Message
+            throw ('Cannot initialize private log/journal. No migration started; no shared-folder fallback. ' + (Protect-CpcText $_.Exception.Message))
         } finally { if ($stream) { $stream.Dispose() } }
-    }
-    if ($script:LogLocationChanged) { Write-CpcLog "Log location changed: script-folder logging was unavailable ($primaryError). Using $script:LogPath" }
     Write-CpcLog "Automatic session log: $script:LogPath"
-    Write-CpcLog "Automatic recovery journal: $($script:S.StatePath). Save is optional; all operation results are logged automatically."
+    Write-CpcLog "Automatic recovery journal: $($script:S.StatePath). Save is optional; diagnostics contain bounded summaries, not complete API responses."
 }
 
 function Write-CpcLog([string]$Text) {
@@ -95,7 +193,8 @@ function Write-CpcLog([string]$Text) {
 }
 
 function Open-CpcJournalLease([string]$Path) {
-    $full = [IO.Path]::GetFullPath($Path)
+    $full = Assert-CpcPrivatePath $Path -Create
+    $null = Assert-CpcPrivatePath "$full.lock" -Create
     if ($script:JournalLease -and $script:JournalLease.Path -eq $full) { return $script:JournalLease }
     $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($full))
     try { $stream = [IO.File]::Open("$full.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
@@ -116,21 +215,29 @@ function Open-CpcPlanLease($State) {
 }
 
 function Write-CpcAudit([string]$EventName, $Details) {
+    try {
     if ($EventName -ne 'Log') { Write-CpcSessionRecord $EventName $Details }
     if (-not $script:S -or -not $script:S.StatePath) { return }
     if (-not $script:JournalLease -or $script:JournalLease.Path -ne [IO.Path]::GetFullPath($script:S.StatePath)) {
         throw 'Journal is not exclusively locked; save/load the plan before continuing.'
     }
     $path = $script:S.StatePath + '.events.jsonl'
+    $null = Assert-CpcPrivatePath $path
+    $null = Assert-CpcPrivatePath "$path.1"
     # Bounded durable evidence, no request bodies, credentials or SAS queries.
     if ([IO.File]::Exists($path) -and ([IO.FileInfo]$path).Length -ge 5MB) { [IO.File]::Move($path, "$path.1", $true) }
     $line = Protect-CpcText (@{ Utc = [datetime]::UtcNow.ToString('o'); PlanId = $script:S.PlanId; Event = $EventName; Details = $Details } | ConvertTo-Json -Depth 10 -Compress)
+    if ([text.encoding]::UTF8.GetByteCount($line) -gt $script:DiagnosticRecordLimit - 1) {
+        $line = @{ Utc = [datetime]::UtcNow.ToString('o'); PlanId = $script:S.PlanId; Event = $EventName; Details = @{ Omitted = 'Oversized diagnostic event; recovery journal remains authoritative' } } | ConvertTo-Json -Compress
+    }
     $stream = [IO.File]::Open($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     try { $bytes = [text.encoding]::UTF8.GetBytes($line + "`n"); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
+    } catch { Set-CpcPersistenceFault $_.Exception.Message; throw }
 }
 
 function Assert-CpcContinue {
+    if ($script:PersistenceFault) { throw 'Persistence is faulted; restore journal writes before continuing. No automatic replay.' }
     if ($script:Signals -and $script:Signals.Cancel) {
         throw 'Stopped between steps. In-flight Azure/Graph operations are NOT rolled back. Refresh status before continuing.'
     }
@@ -160,10 +267,10 @@ function Initialize-CpcState {
 
 function Save-CpcState($State = $script:S, $Lease = $null) {
     if (-not $State.StatePath) { return }
-    if (-not $Lease) { $Lease = Open-CpcJournalLease $State.StatePath }
     $committed = $false
     $planLease = $null
     try {
+    if (-not $Lease) { $Lease = Open-CpcJournalLease $State.StatePath }
     $planLease = Open-CpcPlanLease $State
     # Explicit whitelist: no tokens, storage contexts, SAS URLs or request bodies persisted.
     $persist = [ordered]@{}
@@ -172,6 +279,8 @@ function Save-CpcState($State = $script:S, $Lease = $null) {
     }
     $json = Protect-CpcText ($persist | ConvertTo-Json -Depth 30)
     $path = $Lease.Path
+    $null = Assert-CpcPrivatePath $path
+    $null = Assert-CpcPrivatePath "$path.tmp"
     if ([IO.File]::Exists($path)) {
         $prior = [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
         if ((Get-Value $prior 'PlanId') -ne $State.PlanId) { throw 'Refusing to overwrite a different migration plan. Choose a new journal path.' }
@@ -180,13 +289,14 @@ function Save-CpcState($State = $script:S, $Lease = $null) {
     try { $bytes = [text.encoding]::UTF8.GetBytes($json); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
     [IO.File]::Move("$path.tmp", $path, $true)
+    if ([IO.File]::ReadAllText($path) -cne $json) { throw 'Journal read-back did not match the durable write.' }
     if ($script:JournalLease -and $script:JournalLease -ne $Lease) { $script:JournalLease.Stream.Dispose() }
     $script:JournalLease = $Lease
     if ($script:PlanLease -and $script:PlanLease -ne $planLease) { $script:PlanLease.Stream.Dispose() }
     $script:PlanLease = $planLease
     $committed = $true
-    } finally {
-        if (-not $committed -and $Lease -ne $script:JournalLease) { $Lease.Stream.Dispose() }
+    } catch { Set-CpcPersistenceFault $_.Exception.Message; throw } finally {
+        if (-not $committed -and $Lease -and $Lease -ne $script:JournalLease) { $Lease.Stream.Dispose() }
         if (-not $committed -and $planLease -and $planLease -ne $script:PlanLease) { $planLease.Stream.Dispose() }
     }
 }
@@ -229,6 +339,12 @@ function Get-CpcGraphFailureDetail([System.Management.Automation.ErrorRecord]$Re
     return $detail
 }
 
+function Get-CpcGraphDiagnosticPath([string]$Path) {
+    $route = ([uri]::new([uri]$script:GraphRoot, $Path)).AbsolutePath
+    $route = $route -replace '(?i)(/(?:users|groups|cloudPCs|userSettings|provisioningPolicies|azureNetworkConnections)/)[^/]+', '$1{resource}'
+    return ($route -replace '\([^)]*\)', '(...)')
+}
+
 function Invoke-CpcGraph {
     param([ValidateSet('GET','POST','PATCH','DELETE')][string]$Method = 'GET', [string]$Path, $Body)
     $uri = if ($Path.StartsWith('https://')) { $Path } else { "$script:GraphRoot$Path" }
@@ -253,14 +369,16 @@ function Invoke-CpcGraph {
     if ($null -ne $Body) { $params.Body = $Body | ConvertTo-Json -Depth 25 -Compress; $params.ContentType = 'application/json' }
     # No automatic mutation retries: an HTTP timeout can occur AFTER server acceptance.
     for ($attempt = 0; $attempt -lt 4; $attempt++) {
-        Write-CpcAudit 'GraphRequest' @{ Method = $Method; Path = (Protect-CpcText $Path); ClientRequestId = $requestId; Attempt = $attempt }
+        if ($script:PersistenceFault) { throw 'Persistence is faulted; Graph request blocked until explicit local recovery.' }
+        $diagnosticPath = Get-CpcGraphDiagnosticPath $Path
+        Write-CpcAudit 'GraphRequest' @{ Method = $Method; Path = $diagnosticPath; ClientRequestId = $requestId; Attempt = $attempt }
         try {
             $result = Invoke-MgGraphRequest @params
-            Write-CpcSessionRecord 'GraphResult' @{ Method = $Method; Path = $Path; ClientRequestId = $requestId; Result = $result }
-            $safe = Protect-CpcText ($result | ConvertTo-Json -Depth 25)
-            $script:S.GraphResults.Add([pscustomobject]@{ Time = [datetime]::UtcNow; Method = $Method; Path = (Protect-CpcText $Path); ClientRequestId = $requestId; Result = $safe })
+            $summary = @{ Method = $Method; Path = $diagnosticPath; ClientRequestId = $requestId; Outcome = 'Returned'; ItemCount = @(Get-Value $result 'value' @()).Count }
+            Write-CpcSessionRecord 'GraphResult' $summary
+            $script:S.GraphResults.Add([pscustomobject]@{ Time = [datetime]::UtcNow; Method = $Method; Path = $diagnosticPath; ClientRequestId = $requestId; Result = ($summary | ConvertTo-Json -Compress) })
             if ($script:S.GraphResults.Count -gt 250) { $script:S.GraphResults.RemoveAt(0) }
-            Write-CpcAudit 'GraphResponse' @{ Method = $Method; Path = (Protect-CpcText $Path); ClientRequestId = $requestId; Outcome = 'Returned' }
+            Write-CpcAudit 'GraphResponse' $summary
             return $result
         } catch {
             $failure = $_
@@ -270,9 +388,10 @@ function Invoke-CpcGraph {
             $detail = Get-CpcGraphFailureDetail $failure
             $message = Protect-CpcText $failure.Exception.Message
             if ($detail) { $message += " Service response: $detail" }
-            $evidence = @{ Method = $Method; Path = (Protect-CpcText $Path); ClientRequestId = $requestId; StatusCode = [int]$status; Error = $message }
-            Write-CpcAudit 'GraphFailure' $evidence
-            $script:S.GraphResults.Add([pscustomobject]@{ Time = [datetime]::UtcNow; Method = $Method; Path = (Protect-CpcText $Path); ClientRequestId = $requestId; Result = ($evidence | ConvertTo-Json -Depth 5) })
+            $summary = @{ Method = $Method; Path = $diagnosticPath; ClientRequestId = $requestId; StatusCode = [int]$status; Outcome = 'Failed' }
+            Write-CpcAudit 'GraphFailure' $summary
+            $evidence = $summary.Clone(); $evidence.Error = $message
+            $script:S.GraphResults.Add([pscustomobject]@{ Time = [datetime]::UtcNow; Method = $Method; Path = $diagnosticPath; ClientRequestId = $requestId; Result = ($evidence | ConvertTo-Json -Depth 5) })
             if ($script:S.GraphResults.Count -gt 250) { $script:S.GraphResults.RemoveAt(0) }
             if ($Method -eq 'GET' -and [int]$status -in @(429,503,504) -and $attempt -lt 3) {
                 $delay = [math]::Pow(2, $attempt + 1)
@@ -286,7 +405,9 @@ function Invoke-CpcGraph {
                 Assert-CpcContinue
                 continue
             }
-            throw ("Graph $Method failed. Client request $requestId. " + $message)
+            $exception = [InvalidOperationException]::new("Graph $Method failed. Client request $requestId. " + $message)
+            $exception.Data['CpcHttpStatus'] = [int]$status
+            throw $exception
         }
     }
 }
@@ -353,6 +474,47 @@ function Get-CpcGraphCollection([string]$Path) {
         $Path = Get-Value $result '@odata.nextLink' ''
         Assert-CpcContinue
     } while ($Path)
+}
+
+function Get-CpcMappedUser($Row) {
+    # cloudPC has no userId property. Bind the mapped UPN through the directory
+    # user object instead; never silently accept a rename or recycled identity.
+    $upn = [string](Get-Value $Row 'UserPrincipalName')
+    if ($upn -notmatch '^[^@\s]+@[^@\s]+$') { throw 'A mapped user is required for a scoped Cloud PC query.' }
+    $expectedId = [string](Get-Value $Row 'UserId')
+    if ($expectedId) {
+        $expectedId = Assert-CpcGuid $expectedId 'Mapped user ID'
+        if ($expectedId -eq [guid]::Empty.ToString()) { throw 'Mapped user ID must not be the zero GUID.' }
+    }
+    $lookup = [uri]::EscapeDataString($(if ($expectedId) { $expectedId } else { $upn }))
+    $user = Invoke-CpcGraph -Path "/v1.0/users/${lookup}?`$select=id,userPrincipalName"
+    $actualId = [guid]::Empty
+    if (-not [guid]::TryParse([string](Get-Value $user 'id'), [ref]$actualId) -or $actualId -eq [guid]::Empty -or
+        ($expectedId -and $actualId.ToString() -ne $expectedId) -or (Get-Value $user 'userPrincipalName') -ne $upn) {
+        throw 'Mapped directory user identity/UPN changed or is missing. Manual review required; no remapping or empty Cloud PC result inferred.'
+    }
+    return $user
+}
+
+function Get-CpcCloudPcs($Rows) {
+    $seen = [collections.generic.hashset[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $verified = [collections.generic.list[object]]::new()
+    foreach ($row in $Rows) {
+        $user = Get-CpcMappedUser $row
+        $upn = [string]$user.userPrincipalName
+        $predicate = "userPrincipalName eq '" + $upn.Replace("'", "''") + "'"
+        # Use the documented cloudPC UPN, not the directory-only userId field.
+        # No tenant-wide fallback if the service rejects the scoped predicate.
+        $path = "$script:Endpoint/cloudPCs?`$filter=" + [uri]::EscapeDataString($predicate)
+        foreach ($pc in @(Get-CpcGraphCollection $path)) {
+            if (-not (Get-Value $pc 'id') -or (Get-Value $pc 'userPrincipalName') -ne $upn) { throw 'Cloud PC scoped query returned an unrelated or unidentified resource; no broad fallback permitted.' }
+            if ($seen.Add([string]$pc.id)) { $verified.Add($pc) }
+        }
+        # Catch a directory rename/replacement during pagination, including an
+        # empty result. This is not a cross-service transaction; coordinate admins.
+        $null = Get-CpcMappedUser @{ UserId = $user.id; UserPrincipalName = $upn }
+    }
+    return $verified.ToArray()
 }
 
 function Get-CpcImportResult([string]$SnapshotId) {
@@ -719,7 +881,7 @@ function Set-CpcMappings($Data) {
             Selected = $true; VmId = $m.VmId; VM = $vm[0].Name; ResourceGroup = $vm[0].ResourceGroup; Location = $vm[0].Location
             UserPrincipalName = $m.UserPrincipalName.Trim(); UserId = ''; Phase = 'Mapped'; Readiness = 'NotChecked'; Detail = ''
             Guest = $null; Attested = $false; CheckedUtc = ''; SnapshotName = ''; SnapshotId = ''; VhdBlob = ''; VmgsBlob = ''
-            VhdCopyId = ''; VmgsCopyId = ''; ImportId = ''; ImportStatus = ''; UsageStatus = ''; CloudPcId = ''; CloudPcStatus = ''
+            VhdCopyId = ''; VmgsCopyId = ''; ImportId = ''; ImportStatus = ''; UsageStatus = ''; CloudPcId = ''; CloudPcStatus = ''; CloudPcName = ''; ObservedCloudPcId = ''
             SourceVmUniqueId = ''; SourceDiskId = ''; CaptureStartedUtc = ''; ImportStartedUtc = ''; LicenseAssignedUtc = ''; ValidatedUtc = ''; LastError = ''
         })
     }
@@ -793,19 +955,22 @@ function Test-CpcLocal {
     Add-CpcCheck 'Workstation' 'API support' 'Manual' 'Migration uses Graph beta. Obtain approval for a controlled pilot; beta APIs can change.'
 }
 
+function ConvertTo-CpcUtcInstant($Value) {
+    if ($Value -is [datetimeoffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { throw 'Timestamp must have an explicit timezone; unspecified DateTime is not trusted.' }
+        return [datetimeoffset]::new($Value).ToUniversalTime()
+    }
+    $text = [string]$Value
+    if ($text -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\z') { throw 'Timestamp must be ISO 8601 with an explicit timezone.' }
+    return [datetimeoffset]::Parse($text, [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).ToUniversalTime()
+}
+
 function Test-CpcGuestEvidenceFresh($Timestamp) {
     # ConvertFrom-Json can materialize ISO timestamps as DateTime. Passing that
     # object to Parse(string) formats it first, losing UTC and mixing cultures.
     try {
-        if ($Timestamp -is [datetimeoffset]) { $instant = $Timestamp }
-        elseif ($Timestamp -is [datetime]) {
-            if ($Timestamp.Kind -eq [DateTimeKind]::Unspecified) { return $false }
-            $instant = [datetimeoffset]::new($Timestamp)
-        } else {
-            $text = [string]$Timestamp
-            if ($text -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$') { return $false }
-            $instant = [datetimeoffset]::Parse($text, [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
-        }
+        $instant = ConvertTo-CpcUtcInstant $Timestamp
         $age = [datetimeoffset]::UtcNow - $instant
         return $age.TotalHours -ge 0 -and $age.TotalHours -lt 24
     } catch { return $false }
@@ -881,7 +1046,6 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
         $capacity = $true
         Add-CpcCheck 'Batch' 'License eligibility / availability' 'Pass' "$($license.SelectionLabel); required for selection: $required"
     } catch { Add-CpcCheck 'Batch' 'License eligibility / availability' 'Fail' $_.Exception.Message }
-    $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs")
     $settings = @(Get-CpcGraphCollection "$script:Endpoint/userSettings?`$expand=assignments")
     $reusableSetting = $null
     $existingGroupId = [string](Get-Value $script:S.Config 'ExistingGroupId' '')
@@ -915,6 +1079,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
     foreach ($row in $Rows) {
         Assert-CpcContinue
         $row.Readiness = 'Blocked'
+        $row.LastError = ''
         try {
             $vm = Get-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM
             $instance = Get-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM -Status
@@ -922,13 +1087,21 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             if (-not $diskId) { throw 'A managed OS disk is required.' }
             $diskParts = $diskId.Split('/')
             $disk = Get-AzDisk -ResourceGroupName $diskParts[4] -DiskName $diskParts[8]
+            $boundVm = Get-Value $row.Guest 'SourceVmUniqueId'
+            $boundDisk = Get-Value $row.Guest 'SourceDiskId'
+            $boundDiskInstance = Get-Value $row.Guest 'SourceDiskUniqueId'
+            $sameAssessedSource = $boundVm -and $boundDisk -and $boundDiskInstance -and
+                $boundVm -eq [string]$vm.VmId -and $boundDisk -eq $diskId -and $boundDiskInstance -eq (Get-Value $disk 'UniqueId')
+            # Legacy captured attempts cannot be reassessed safely. Retain their
+            # recorded capture/snapshot gates; never manufacture assessment bindings.
+            $legacyFrozen = $row.SourceVmUniqueId -and $row.SourceDiskId -and -not $boundVm -and -not $boundDisk -and -not $boundDiskInstance
             $sameInspectedSource = (-not (Get-Value $row 'ObservedSourceDiskId') -or $row.ObservedSourceDiskId -eq $diskId) -and
                 (-not (Get-Value $row 'ObservedSourceVmUniqueId') -or $row.ObservedSourceVmUniqueId -eq [string]$vm.VmId)
-            if (-not (Get-Value $row 'ObservedSourceDiskId')) { $row.ObservedSourceDiskId = $diskId }
-            if (-not (Get-Value $row 'ObservedSourceVmUniqueId')) { $row.ObservedSourceVmUniqueId = [string]$vm.VmId }
+            if ($sameAssessedSource) { $row.ObservedSourceDiskId = $diskId; $row.ObservedSourceVmUniqueId = [string]$vm.VmId }
             $securityType = [string](Get-Value $vm.SecurityProfile 'SecurityType' '')
             $power = @($instance.Statuses | Where-Object Code -Like 'PowerState/*' | ForEach-Object Code) -join ','
             $tests = [ordered]@{
+                'Guest evidence bound to source identity' = [bool]($sameAssessedSource -or $legacyFrozen)
                 'Same inspected source VM and disk' = $sameInspectedSource
                 'Windows OS disk' = [string]$vm.StorageProfile.OsDisk.OsType -eq 'Windows'
                 'Generation 2' = [string]$disk.HyperVGeneration -eq 'V2'
@@ -956,11 +1129,17 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             $key = [uri]::EscapeDataString($row.UserPrincipalName)
             $user = Invoke-CpcGraph -Path "/v1.0/users/$key`?`$select=id,displayName,userPrincipalName,accountEnabled,usageLocation,assignedLicenses"
             if ($row.UserId -and $row.UserId -ne $user.id) { throw 'Target UPN now resolves to a different user object. Start a new plan; remapping refused.' }
+            if (-not (Get-Value $user 'id') -or (Get-Value $user 'userPrincipalName') -ne $row.UserPrincipalName) { throw 'Target directory user identity/UPN is missing or changed; remapping refused.' }
+            $pcs = @(Get-CpcCloudPcs @(@{ UserId = $user.id; UserPrincipalName = $row.UserPrincipalName }))
             $row.UserId = $user.id
             $row.UserPrincipalName = $user.userPrincipalName
             $row.UserDisplayName = [string](Get-Value $user 'displayName' '')
+            # Validation also performs a complete directory-verified lookup. Clear
+            # obsolete pre-license observations here before any licensing trigger,
+            # even if the operator did not run Refresh between stages.
+            Update-CpcPreLicenseCloudPcObservation $row $pcs
             $tests['Enabled target user and usage location'] = $user.accountEnabled -eq $true -and -not [string]::IsNullOrEmpty($user.usageLocation)
-            $tests['No existing Cloud PC'] = @($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName -or (Get-Value $_ 'userId') -eq $row.UserId }).Count -eq 0
+            $tests['No existing Cloud PC'] = @($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName }).Count -eq 0
             $assignedSkuIds = @($user.assignedLicenses | ForEach-Object { $_.skuId })
             # Detect existing W365 entitlements across ALL families, not only allowed targets.
             $cloudSkus = @($skus | Where-Object { ($_.skuPartNumber + ',' + (($_.servicePlans | ForEach-Object servicePlanName) -join ',')) -match '(?i)CLOUDPC|WINDOWS[_ ]?365|CPC_' } | ForEach-Object skuId)
@@ -968,7 +1147,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             if ($row.Phase -eq 'LicenseUnknown' -and $reconcileUsers.ContainsKey($row.UserId) -and $script:S.Config.SkuId -in $assignedSkuIds) {
                 # Reconciliation records an already-present license without repeating a write.
                 $tests['No premature Windows 365 license'] = @($assignedSkuIds | Where-Object { $_ -in $cloudSkus -and $_ -ne $script:S.Config.SkuId }).Count -eq 0
-                $existingPcs = @($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName -or (Get-Value $_ 'userId') -eq $row.UserId })
+                $existingPcs = @($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName })
                 $tests['No existing Cloud PC'] = $existingPcs.Count -eq 0 -or ($existingPcs.Count -eq 1 -and (Get-Value $existingPcs[0] 'provisioningPolicyId') -eq $script:S.Config.PolicyId)
             }
             $groups = @(Get-CpcGraphCollection "/v1.0/users/$($row.UserId)/transitiveMemberOf/microsoft.graph.group?`$select=id")
@@ -992,6 +1171,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
                 $tests['Snapshot user setting assigned'] = $ours.Count -eq 1 -and @((Get-Value ($ours | Select-Object -First 1) 'assignments' @()) | Where-Object { (Get-Value (Get-Value $_ 'target') 'groupId') -eq $script:S.GroupId }).Count -eq 1
             }
             $guest = $row.Guest
+            if ($legacyFrozen) { Add-CpcCheck $row.VM 'Legacy captured guest identity' 'Manual' 'This older captured attempt has no assessment-time identity binding. Existing capture/snapshot ownership checks still apply. Independently review source/data provenance; do not restart/reassess or backfill historical IDs.' }
             $tests['Guest assessment captured'] = $null -ne $guest
             if ($guest) {
                 $tests['Client Windows 10+ (not Server/multi-session)'] = [int]$guest.ProductType -eq 1 -and [int]$guest.Build -ge 10240 -and $guest.Edition -notmatch 'Server|Multi|Virtual'
@@ -1003,6 +1183,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             $tests['Operator attestation recorded'] = $row.Attested -eq $true
             foreach ($test in $tests.GetEnumerator()) {
                 $detail = Get-CpcGuestCheckDetail $row $test.Key
+                if ($test.Key -eq 'Guest evidence bound to source identity' -and -not $test.Value) { $detail = 'Guest assessment is missing identity binding or belongs to another VM/disk instance. Before capture, run Assess guest again, attest and validate. Captured attempts require recovery review; never restart the source or edit historical evidence.' }
                 if ($test.Key -eq 'No conflicting user setting' -and -not $test.Value) {
                     $conflicts = ($otherSettings | ForEach-Object { "$(Get-Value $_ 'displayName' '(unnamed)') [$(Get-Value $_ 'id' '(unknown ID)'); source: $(Get-Value $_ 'provisioningSourceType' 'unknown')]" }) -join '; '
                     $imageOnly = @($otherSettings | Where-Object { (Get-Value $_ 'provisioningSourceType' '') -ne 'image' }).Count -eq 0
@@ -1021,6 +1202,7 @@ function Test-CpcRows($Rows, [switch]$Preparing) {
             $row.CheckedUtc = [datetime]::UtcNow.ToString('o')
             $row.Detail = "$power; $($disk.DiskSizeGB) GiB; $securityType"
         } catch {
+            $row.Readiness = 'Blocked'
             $row.LastError = Protect-CpcText $_.Exception.Message
             Add-CpcCheck $row.VM 'Assessment' 'Fail' $row.LastError
         }
@@ -1068,7 +1250,7 @@ function Assert-CpcPreflight($Rows, [string]$Action) {
         $approval = Get-Value $script:S.Preflight $row.VmId
         if (-not $approval -or $approval.Stage -ne $Action -or
             $approval.Fingerprint -ne (Get-CpcPreflightFingerprint $row) -or
-            [datetimeoffset]::UtcNow -ge [datetimeoffset]::Parse($approval.ExpiresUtc) -or $row.Readiness -ne 'Ready') {
+            [datetimeoffset]::UtcNow -ge (ConvertTo-CpcUtcInstant $approval.ExpiresUtc) -or $row.Readiness -ne 'Ready') {
             throw "$($row.VM): click Validate prerequisites first and obtain PASS for $Action. Approval is single-use, expires after 30 minutes and is invalid after phase/configuration/evidence changes or journal reload. Final Validate cutover is a different step."
         }
     }
@@ -1143,6 +1325,17 @@ function Test-CpcPreflight($Rows) {
     Save-CpcState
 }
 
+function Get-CpcAssessmentSource($Row) {
+    $vm = Get-AzVM -ResourceGroupName $Row.ResourceGroup -Name $Row.VM
+    $diskId = [string]$vm.StorageProfile.OsDisk.ManagedDisk.Id
+    if (-not $vm.VmId -or $diskId -notmatch '^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Compute/disks/[^/]+$') { throw 'Cannot bind guest evidence without VM and managed OS-disk identity.' }
+    $parts = $diskId.Split('/')
+    $disk = Get-AzDisk -ResourceGroupName $parts[4] -DiskName $parts[8]
+    $unique = [string](Get-Value $disk 'UniqueId')
+    if (-not $unique) { throw 'Managed OS disk unique ID is unavailable; guest identity cannot be verified.' }
+    return @{ SourceVmUniqueId = [string]$vm.VmId; SourceDiskId = $diskId; SourceDiskUniqueId = $unique }
+}
+
 function Invoke-CpcGuestAssessment($Rows) {
     Assert-CpcContext
     foreach ($row in $Rows) {
@@ -1164,13 +1357,24 @@ $result = @{ ProductType = [int]$os.ProductType; Build = [int]$os.BuildNumber; C
 '@
     foreach ($row in $Rows) {
         Assert-CpcContinue
+        $row.Guest = $null; $row.Attested = $false; $row.Readiness = 'NotChecked'
+        Save-CpcState # Failed reassessment must not leave the previous evidence usable.
+        $before = Get-CpcAssessmentSource $row
         $status = Get-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM -Status
         if (@($status.Statuses | Where-Object Code -EQ 'PowerState/running').Count -ne 1) { throw "$($row.VM) must be running for guest assessment. The app will not automatically start it." }
         Write-CpcLog "Running read-only guest assessment through Azure Run Command on $($row.VM)."
         $r = Invoke-AzVMRunCommand -ResourceGroupName $row.ResourceGroup -VMName $row.VM -CommandId RunPowerShellScript -ScriptString $guestScript
         $message = ($r.Value | ForEach-Object Message) -join "`n"
         if ($message -notmatch '(?s)CPC_GUEST_BEGIN(.*?)CPC_GUEST_END') { throw 'Guest assessment did not return valid evidence; inspect Run Command in Azure.' }
-        $row.Guest = $Matches[1] | ConvertFrom-Json -AsHashtable
+        $guest = $Matches[1] | ConvertFrom-Json -AsHashtable
+        $after = Get-CpcAssessmentSource $row
+        foreach ($key in $before.Keys) {
+            if ($before[$key] -ne $after[$key]) { throw 'VM or OS disk changed during guest assessment. Evidence discarded; review the source and assess again before capture.' }
+            $guest[$key] = $before[$key]
+        }
+        $row.Guest = $guest
+        $row.ObservedSourceVmUniqueId = $before.SourceVmUniqueId
+        $row.ObservedSourceDiskId = $before.SourceDiskId
         $agent = Get-Value $status 'VMAgent'
         $agentStatuses = @(Get-Value $agent 'Statuses' @())
         $row.Guest.AgentReady = @($agentStatuses | Where-Object { $_.Code -eq 'ProvisioningState/succeeded' }).Count -gt 0
@@ -1321,7 +1525,7 @@ function Repair-CpcSnapshotAssignments {
     $chosen = @($policies | Where-Object { $_.id -eq $script:S.Config.PolicyId })
     if ($chosen.Count -ne 1 -or -not (Test-CpcPolicyTarget $chosen[0])) { throw 'Select an accessible Windows 365 dedicated desktop policy before repair.' }
     $settings = @(Get-CpcGraphCollection "$script:Endpoint/userSettings?`$expand=assignments")
-    $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs")
+    $pcs = @(Get-CpcCloudPcs $rows)
     $skus = @(Get-CpcGraphCollection '/v1.0/subscribedSkus')
     $cloudSkuIds = @($skus | Where-Object {
         ((Get-Value $_ 'skuPartNumber' '') + ',' + ((@(Get-Value $_ 'servicePlans' @()) | ForEach-Object { Get-Value $_ 'servicePlanName' '' }) -join ',')) -match '(?i)CLOUDPC|WINDOWS[_ ]?365|CPC_'
@@ -1330,7 +1534,7 @@ function Repair-CpcSnapshotAssignments {
     foreach ($row in $rows) {
         $user = Invoke-CpcGraph -Path "/v1.0/users/$($row.UserId)?`$select=id,userPrincipalName,accountEnabled,assignedLicenses"
         if ((Get-Value $user 'id') -ne $row.UserId -or (Get-Value $user 'userPrincipalName') -ne $row.UserPrincipalName -or (Get-Value $user 'accountEnabled') -ne $true) { throw 'Target user identity/enablement changed; repair blocked.' }
-        if (@($pcs | Where-Object { (Get-Value $_ 'userId') -eq $row.UserId -or (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName }).Count -or
+        if (@($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName }).Count -or
             @(@(Get-Value $user 'assignedLicenses' @()) | Where-Object { $_.skuId -eq $script:S.Config.SkuId -or $_.skuId -in $cloudSkuIds }).Count) {
             throw 'Target user already has a Cloud PC or Windows 365 license; repair could trigger provisioning and is blocked.'
         }
@@ -1396,6 +1600,17 @@ function Assert-CpcOwnedSnapshot($Row) {
     return $snap
 }
 
+function Assert-CpcCaptureSource($Row) {
+    $current = Get-CpcAssessmentSource $Row
+    foreach ($key in @('SourceVmUniqueId','SourceDiskId','SourceDiskUniqueId')) {
+        $expected = Get-Value $Row.Guest $key
+        if (-not $expected) { $expected = Get-Value $Row $key }
+        if ($expected -and $current[$key] -ne $expected) { throw 'Source identity changed after guest assessment/capture. Stop and review; no evidence is rebound.' }
+        if (-not $expected -and -not $Row.SourceVmUniqueId) { throw 'Capture requires source-bound guest evidence. Assess the running source again before capture.' }
+    }
+    return $current
+}
+
 function Start-CpcCapture($Rows) {
     Assert-CpcContext
     Assert-CpcPreflight $Rows 'Capture'
@@ -1408,10 +1623,13 @@ function Start-CpcCapture($Rows) {
         Test-CpcRows @($row)
         if ($row.Readiness -ne 'Ready') { throw "$($row.VM) is not ready. Inspect prerequisite results." }
         $vm = Get-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM
+        $identity = Assert-CpcCaptureSource $row
+        if ([string]$vm.VmId -ne $identity.SourceVmUniqueId -or [string]$vm.StorageProfile.OsDisk.ManagedDisk.Id -ne $identity.SourceDiskId) { throw 'Source changed during capture precheck; no VM stopped.' }
         $trusted = [string](Get-Value $vm.SecurityProfile 'SecurityType' '') -eq 'TrustedLaunch'
         if (-not $row.SnapshotName) {
             $row.SourceVmUniqueId = [string]$vm.VmId
             $row.SourceDiskId = [string]$vm.StorageProfile.OsDisk.ManagedDisk.Id
+            $row.SourceDiskUniqueId = $identity.SourceDiskUniqueId
             if (-not $row.SourceVmUniqueId -or -not $row.SourceDiskId) { throw 'Source immutable VM ID / OS disk ID missing.' }
             $row.SnapshotName = 'cpcm-' + [guid]::NewGuid().ToString('N')
             $row.SnapshotId = "/subscriptions/$($script:S.SubscriptionId)/resourceGroups/$($script:S.Config.SnapshotResourceGroup)/providers/Microsoft.Compute/snapshots/$($row.SnapshotName)"
@@ -1427,6 +1645,7 @@ function Start-CpcCapture($Rows) {
             Stop-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM -Force | Out-Null
             $status = Get-AzVM -ResourceGroupName $row.ResourceGroup -Name $row.VM -Status
             if (@($status.Statuses | Where-Object Code -EQ 'PowerState/deallocated').Count -ne 1) { throw 'VM is not deallocated. No snapshot will be created.' }
+            $null = Assert-CpcCaptureSource $row
             Assert-CpcContinue
             $existing = @(Get-AzSnapshot -ResourceGroupName $script:S.Config.SnapshotResourceGroup | Where-Object Name -EQ $row.SnapshotName)
             if (-not $existing.Count) {
@@ -1549,14 +1768,81 @@ function Start-CpcImport($Rows) {
     }
 }
 
+function Test-CpcHistoricalImportOptional($Row, $CloudPcs) {
+    # Only a missing historical artifact after an independently attributable
+    # provisioning trigger is optional. Permission/transport/identity errors are not.
+    if ($Row.Phase -notin @('LicenseUnknown','Provisioning','Provisioned','Validated','CleanupPending') -or
+        $Row.ImportStatus -ne 'succeeded' -or -not $Row.ImportId) { return $false }
+    if ($Row.Phase -ne 'LicenseUnknown' -and -not $Row.LicenseAssignedUtc) { return $false }
+    if ($Row.Phase -in @('Validated','CleanupPending') -and -not $Row.ValidatedUtc) { return $false }
+    # CloudPcs comes from the directory-verified scoped lookup; do not infer an
+    # API userId field or accept unbound legacy rows as post-license evidence.
+    if (-not $Row.UserId) { return $false }
+    $matches = @($CloudPcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $Row.UserPrincipalName })
+    if ($matches.Count -ne 1) { return $false }
+    $pc = $matches[0]
+    return (Get-Value $pc 'userPrincipalName') -eq $Row.UserPrincipalName -and
+        (Get-Value $pc 'provisioningPolicyId') -eq $script:S.Config.PolicyId -and (Get-Value $pc 'id') -and
+        (-not $Row.CloudPcId -or $Row.CloudPcId -eq $pc.id) -and (Get-Value $pc 'status') -in @('provisioning','provisioned')
+}
+
+function Test-CpcBeforeLicenseAttempt($Row) {
+    # A missing timestamp alone is NOT enough: preserve post-license, unknown
+    # and accepted migration identities even in older/incomplete journals.
+    if ((Get-Value $Row 'Phase') -notin @('Mapped','IdentityPrepared','Capturing','CaptureFailed','Copying','CopyFailed','Staged',
+        'ImportSubmitting','ImportUnknown','Importing','Imported','ImportFailed','PurgeSubmitting','PurgeUnknown','Purged',
+        'ResettingCapture','Abandoning','Abandoned')) { return $false }
+    foreach ($key in @('LicenseStartedUtc','LicenseAssignedUtc','LicenseReconciledUtc','LicenseReconciliationEvidence','ValidatedUtc')) {
+        if (Get-Value $Row $key) { return $false }
+    }
+    if ((Get-Value $Row 'UsageStatus') -eq 'inUse') { return $false }
+    return $true
+}
+
+function Update-CpcPreLicenseCloudPcObservation($Row, $CloudPcs) {
+    if (-not (Test-CpcBeforeLicenseAttempt $Row)) { return }
+    # Call only with a SUCCESSFUL, complete Get-CpcCloudPcs result (including
+    # both directory-ID checks). Errors/partial pages never establish absence.
+    $matches = @($CloudPcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $Row.UserPrincipalName })
+    if ($matches.Count) {
+        # A previous/external PC is a conflict, not this migration's result.
+        # Retain any legacy CloudPcId until absence is independently observed.
+        $Row.ObservedCloudPcId = if ($matches.Count -eq 1) { [string]$matches[0].id } else { '' }
+        $Row.CloudPcStatus = if ($matches.Count -eq 1) { [string](Get-Value $matches[0] 'status') } else { 'Multiple existing Cloud PCs' }
+        $Row.CloudPcName = if ($matches.Count -eq 1) { [string](Get-Value $matches[0] 'displayName') } else { '' }
+        $Row.LastError = 'Existing Cloud PC found before this migration attempted licensing. Wait for deprovisioning to disappear from Graph or reconcile the conflict; do not capture/import/license around it.'
+        $Row.Readiness = 'Blocked'; $script:S.Preflight.Remove($Row.VmId)
+        return
+    }
+    if ((Get-Value $Row 'CloudPcId') -or (Get-Value $Row 'ObservedCloudPcId') -or
+        (Get-Value $Row 'CloudPcStatus') -or (Get-Value $Row 'CloudPcName')) {
+        # Preserve evidence BEFORE clearing an old build's pre-license binding.
+        # An audit failure must leave the recorded identity untouched.
+        Write-CpcAudit 'PreLicenseCloudPcObservationCleared' @{
+            VmId = $Row.VmId; UserId = $Row.UserId; Phase = $Row.Phase
+            RecordedCloudPcId = [string](Get-Value $Row 'CloudPcId')
+            ObservedCloudPcId = [string](Get-Value $Row 'ObservedCloudPcId')
+            PreviousStatus = [string](Get-Value $Row 'CloudPcStatus')
+            Reason = 'Successful directory-verified Cloud PC lookup returned no matching records before any recorded license attempt.'
+        }
+        foreach ($key in @('CloudPcId','ObservedCloudPcId','CloudPcStatus','CloudPcName')) { $Row[$key] = '' }
+        $Row.Readiness = 'NotChecked'; $script:S.Preflight.Remove($Row.VmId)
+    }
+}
+
 function Update-CpcStatus($Rows) {
     Assert-CpcContext
     $script:RefreshSucceededIds.Clear()
-    $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs")
+    try { $pcs = @(Get-CpcCloudPcs $Rows) }
+    catch {
+        foreach ($row in $Rows) { $row.LastError = Protect-CpcText $_.Exception.Message; $row.ImportLookupWarning = '' }
+        throw
+    }
     foreach ($row in $Rows) {
         Assert-CpcContinue
         $priorPhase = $row.Phase
         $row.LastError = ''
+        $row.ImportLookupWarning = ''
         try {
             if ($row.Phase -eq 'Copying') {
                 $storage = Get-CpcStorage
@@ -1575,6 +1861,7 @@ function Update-CpcStatus($Rows) {
                     elseif ([long]$copy.TotalBytes -le 0 -or [long]$copy.BytesCopied -ne [long]$copy.TotalBytes) { throw 'Copy reported Success with incomplete/unknown bytes. Staging remains blocked; review copy evidence.' }
                 }
                 if ($finished) {
+                    Assert-CpcPersistenceReady
                     $snapshot = Assert-CpcOwnedSnapshot $row
                     if ((Get-Value (Get-Value $snapshot 'SecurityProfile') 'SecurityType') -eq 'TrustedLaunch' -and -not $row.VmgsBlob) { throw 'Trusted Launch requires the matching VMGS copy. Staging cannot complete without it.' }
                     Revoke-AzSnapshotAccess -ResourceGroupName $script:S.Config.SnapshotResourceGroup -SnapshotName $row.SnapshotName | Out-Null
@@ -1585,8 +1872,12 @@ function Update-CpcStatus($Rows) {
                 try {
                     $r = Get-CpcImportResult $row.ImportId
                     if (-not (Test-CpcImportUserIdentity $r $row)) { throw 'Imported snapshot/user mismatch or missing user identity. Expected the journaled user UPN or its exact Entra object ID.' }
+                    $usage = [string](Get-Value $r 'usageStatus' '')
+                    if ($row.UsageStatus -eq 'inUse' -and $usage -ne 'inUse') {
+                        throw 'Import usage evidence regressed or is missing after recorded inUse. Historical consumption evidence retained; manual reconciliation required.'
+                    }
                     $row.ImportStatus = [string](Get-Value $r 'importStatus' '')
-                    $row.UsageStatus = [string](Get-Value $r 'usageStatus' '')
+                    $row.UsageStatus = $usage
                     $row.Detail = Protect-CpcText ([string](Get-Value $r 'additionalDetail' ''))
                     if ($row.Phase -in @('Importing','ImportUnknown')) {
                         if ($row.ImportStatus -eq 'succeeded' -and $row.UsageStatus -eq 'notUsed') { $row.Phase = 'Imported' }
@@ -1595,12 +1886,26 @@ function Update-CpcStatus($Rows) {
                 } catch {
                     # Imported artifacts can be cleaned up by the service after provisioning.
                     # Preserve historical success, but NEVER describe a failed read as success.
-                    $row.LastError = 'Import lookup unavailable; historical result retained: ' + (Protect-CpcText $_.Exception.Message)
-                    Write-CpcLog "$($row.VM): $($row.LastError)"
+                    $detail = 'Import lookup unavailable; historical result retained: ' + (Protect-CpcText $_.Exception.Message)
+                    if ($_.Exception.Data['CpcHttpStatus'] -eq 404 -and (Test-CpcHistoricalImportOptional $row $pcs)) {
+                        $row.ImportLookupWarning = $detail + ' Live Cloud PC identity/policy matched. This is not proof of snapshot consumption or data correctness; recovery/acceptance checks still apply.'
+                        Write-CpcLog "$($row.VM): $($row.ImportLookupWarning)"
+                    } else {
+                        $row.LastError = $detail
+                        Write-CpcLog "$($row.VM): $($row.LastError)"
+                    }
                 }
             }
-            $matchingPcs = @($pcs | Where-Object { (Get-Value $_ 'userId') -eq $row.UserId -or (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName })
-            if ($matchingPcs.Count -eq 1) {
+            $matchingPcs = @($pcs | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName })
+            if (Test-CpcBeforeLicenseAttempt $row) {
+                if (-not $row.LastError) { Update-CpcPreLicenseCloudPcObservation $row $matchingPcs }
+            } elseif ($matchingPcs.Count -eq 1) {
+                $pc = $matchingPcs[0]
+                if ((Get-Value $pc 'userPrincipalName') -ne $row.UserPrincipalName -or
+                    (Get-Value $pc 'provisioningPolicyId') -ne $script:S.Config.PolicyId -or
+                    ($row.CloudPcId -and $row.CloudPcId -ne $pc.id)) {
+                    throw 'Cloud PC identity/policy differs from the journal. Manual correlation required; recorded identity was not replaced.'
+                }
                 $row.CloudPcId = $matchingPcs[0].id; $row.CloudPcStatus = $matchingPcs[0].status
                 $row.CloudPcName = [string](Get-Value $matchingPcs[0] 'displayName' '')
                 if ($row.LicenseAssignedUtc -and $row.CloudPcStatus -eq 'provisioned' -and $row.Phase -in @('Provisioning','Provisioned')) { $row.Phase = 'Provisioned' }
@@ -1620,18 +1925,19 @@ function Update-CpcTimingWarning($Row) {
     $messages = [collections.generic.list[string]]::new()
     $start = ''; $expires = ''; $limit = 2
     switch ($Row.Phase) {
-        { $_ -in @('Capturing','CaptureFailed','Copying','CopyFailed') } { $start = [string](Get-Value $Row 'CaptureStartedUtc'); $expires = [string](Get-Value $Row 'ExportExpiresUtc') }
-        { $_ -in @('Importing','ImportUnknown') } { $start = [string](Get-Value $Row 'ImportStartedUtc'); $expires = [string](Get-Value $Row 'ImportSasExpiresUtc'); $limit = 6 }
-        { $_ -in @('Provisioning','LicenseUnknown') } { $start = [string](Get-Value $Row 'LicenseStartedUtc' (Get-Value $Row 'LicenseAssignedUtc')); $limit = 2 }
+        { $_ -in @('Capturing','CaptureFailed','Copying','CopyFailed') } { $start = Get-Value $Row 'CaptureStartedUtc'; $expires = Get-Value $Row 'ExportExpiresUtc' }
+        { $_ -in @('Importing','ImportUnknown') } { $start = Get-Value $Row 'ImportStartedUtc'; $expires = Get-Value $Row 'ImportSasExpiresUtc'; $limit = 6 }
+        { $_ -in @('Provisioning','LicenseUnknown') } { $start = Get-Value $Row 'LicenseStartedUtc' (Get-Value $Row 'LicenseAssignedUtc'); $limit = 2 }
     }
     $now = [datetimeoffset]::UtcNow
     if ($start) {
-        $elapsed = ($now - [datetimeoffset]::Parse($start)).TotalHours
+        $elapsed = ($now - (ConvertTo-CpcUtcInstant $start)).TotalHours
         if ($elapsed -ge $limit) { $messages.Add("$($Row.Phase) age $([math]::Round($elapsed,1))h exceeds the operator review threshold ($limit h), not a service SLA. Investigate; do not resubmit automatically.") }
     }
     if ($expires) {
-        $remaining = ([datetimeoffset]::Parse($expires) - $now).TotalHours
-        if ($remaining -le 2) { $messages.Add("Recorded SAS expiry: $expires ($([math]::Round($remaining,1))h remaining). Completion/renewal requires review; expiry alone is not proof of failure.") }
+        $expiry = ConvertTo-CpcUtcInstant $expires
+        $remaining = ($expiry - $now).TotalHours
+        if ($remaining -le 2) { $messages.Add("Recorded SAS expiry: $($expiry.ToString('o')) ($([math]::Round($remaining,1))h remaining). Completion/renewal requires review; expiry alone is not proof of failure.") }
     }
     $Row.TimingWarning = $messages -join ' '
     if ($messages.Count) { Add-CpcCheck $Row.VM 'Elapsed time / SAS expiry' 'Manual' $Row.TimingWarning }
@@ -1655,7 +1961,7 @@ function Start-CpcLicense($Rows) {
         $user = Invoke-CpcGraph -Path "/v1.0/users/$($row.UserId)?`$select=id,usageLocation,assignedLicenses,accountEnabled"
         if ($user.accountEnabled -ne $true) { throw 'Target account is disabled.' }
         $assigned = @($user.assignedLicenses | ForEach-Object { $_.skuId })
-        $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs" | Where-Object { (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName -or (Get-Value $_ 'userId') -eq $row.UserId })
+        $pcs = @(Get-CpcCloudPcs @($row))
         if ($script:S.Config.SkuId -in $assigned) { throw 'Target license appeared outside this journal. Reconcile external assignment before continuing.' }
         if ($pcs.Count) { throw 'A Cloud PC already exists. Refusing to assign another license.' }
         if ((Get-Value $r 'importStatus') -ne 'succeeded' -or (Get-Value $r 'usageStatus') -ne 'notUsed') {
@@ -1688,22 +1994,24 @@ function Repair-CpcLicenseOutcome($Rows, $Data) {
     $evidence = [string](Get-Value $Data 'Evidence')
     if ([string]::IsNullOrWhiteSpace($evidence) -or $evidence.Length -gt 2000) { throw 'Supply a reviewed Entra audit/request reference confirming this exact assignment (maximum 2000 characters).' }
     if ([string](Get-Value $Data 'AssignedUtc') -notmatch '(?:Z|[+-]\d{2}:\d{2})$') { throw 'Assignment timestamp needs an explicit timezone, preferably UTC Z.' }
-    $assignedTime = [datetimeoffset]::Parse([string](Get-Value $Data 'AssignedUtc'))
-    $importStart = [datetimeoffset]::Parse($row.ImportStartedUtc)
+    $assignedTime = ConvertTo-CpcUtcInstant (Get-Value $Data 'AssignedUtc')
+    $importStart = ConvertTo-CpcUtcInstant $row.ImportStartedUtc
     if ($assignedTime -lt $importStart -or $assignedTime -gt [datetimeoffset]::UtcNow) { throw 'Assignment timestamp must be after this import attempt and not in the future.' }
-    if ((Get-Value $row 'LicenseStartedUtc') -and $assignedTime -lt [datetimeoffset]::Parse($row.LicenseStartedUtc).AddSeconds(-5)) { throw 'Assignment predates this journaled license attempt.' }
+    if ((Get-Value $row 'LicenseStartedUtc') -and $assignedTime -lt (ConvertTo-CpcUtcInstant $row.LicenseStartedUtc).AddSeconds(-5)) { throw 'Assignment predates this journaled license attempt.' }
     if ($row.ImportStatus -ne 'succeeded' -or -not $row.ImportId) { throw 'A recorded successful import is required; recover import evidence before license reconciliation.' }
     $user = Invoke-CpcGraph -Path "/v1.0/users/$($row.UserId)?`$select=id,userPrincipalName,accountEnabled,assignedLicenses,licenseAssignmentStates"
     if ((Get-Value $user 'id') -ne $row.UserId -or (Get-Value $user 'userPrincipalName') -ne $row.UserPrincipalName -or (Get-Value $user 'accountEnabled') -ne $true) { throw 'User identity or enabled state differs from the plan.' }
     if ($script:S.Config.SkuId -notin @((Get-Value $user 'assignedLicenses' @()) | ForEach-Object { $_.skuId })) { throw 'Exact license is not present. No assignment will be retried.' }
     $states = @((Get-Value $user 'licenseAssignmentStates' @()) | Where-Object { (Get-Value $_ 'skuId') -eq $script:S.Config.SkuId })
     if ($states.Count -ne 1 -or (Get-Value $states[0] 'assignedByGroup') -or (Get-Value $states[0] 'state') -ne 'Active' -or (Get-Value $states[0] 'error') -notin @($null,'','None')) { throw 'Require one active direct assignment with no licensing error; group/ambiguous assignments need manual reconciliation.' }
-    $pcs = @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs" | Where-Object { (Get-Value $_ 'userId') -eq $row.UserId -or (Get-Value $_ 'userPrincipalName') -eq $row.UserPrincipalName })
+    $pcs = @(Get-CpcCloudPcs @($row))
     if ($pcs.Count -ne 1) { throw 'Wait for exactly one attributable Cloud PC; no license write will be repeated.' }
     $pc = Invoke-CpcGraph -Path "$script:Endpoint/cloudPCs/$($pcs[0].id)"
-    if ((Get-Value $pc 'userId') -ne $row.UserId -or (Get-Value $pc 'userPrincipalName') -ne $row.UserPrincipalName -or
+    $null = Get-CpcMappedUser $row
+    if ((Get-Value $pc 'id') -ne $pcs[0].id -or (Get-Value $pc 'userPrincipalName') -ne $row.UserPrincipalName -or
         (Get-Value $pc 'provisioningPolicyId') -ne $script:S.Config.PolicyId -or ((Get-Value $row 'CloudPcId') -and $row.CloudPcId -ne $pc.id)) { throw 'Cloud PC user/policy/identity does not match this migration.' }
-    $created = [datetimeoffset]::Parse([string](Get-Value $pc 'createdDateTime'))
+    if (-not (Get-Value $pc 'createdDateTime')) { throw 'Cloud PC creation evidence is unavailable (createdDateTime is not in the public cloudPC schema). License reconciliation is blocked; obtain reviewed service evidence. Do not substitute provisionedDateTime or repeat license assignment.' }
+    $created = ConvertTo-CpcUtcInstant (Get-Value $pc 'createdDateTime')
     if ($created -lt $importStart -or $created -lt $assignedTime.AddSeconds(-5) -or $created -gt [datetimeoffset]::UtcNow) { throw 'Cloud PC creation time predates the reviewed assignment or is outside this migration attempt.' }
     $policy = Invoke-CpcGraph -Path "$script:Endpoint/provisioningPolicies/$($script:S.Config.PolicyId)"
     if (-not (Test-CpcPolicyTarget $policy)) { throw 'Cloud PC policy is not a compatible Windows 365 desktop policy.' }
@@ -1736,11 +2044,15 @@ function Remove-CpcImportedSnapshot($Rows) {
 function Complete-CpcValidation($Rows) {
     Update-CpcStatus $Rows
     foreach ($row in $Rows) {
+        if ($row.LastError) { throw 'Current status checks failed. Resolve the refresh error before accepting cutover.' }
         if ($row.Phase -ne 'Provisioned' -or $row.ImportStatus -ne 'succeeded' -or -not $row.ImportId -or -not $row.LicenseAssignedUtc) {
             throw 'Completion requires provisioned Cloud PC plus recorded successful import and subsequent license assignment.'
         }
         $pc = Invoke-CpcGraph -Path "$script:Endpoint/cloudPCs/$($row.CloudPcId)"
-        if ((Get-Value $pc 'status') -ne 'provisioned' -or (Get-Value $pc 'userPrincipalName') -ne $row.UserPrincipalName) { throw 'Current Cloud PC status/user does not match this migration.' }
+        if (-not $row.UserId) { throw 'Recorded user identity is required before accepting cutover.' }
+        $null = Get-CpcMappedUser $row
+        if ((Get-Value $pc 'status') -ne 'provisioned' -or (Get-Value $pc 'userPrincipalName') -ne $row.UserPrincipalName -or
+            (Get-Value $pc 'id') -ne $row.CloudPcId) { throw 'Current Cloud PC status/user does not match this migration.' }
         if ((Get-Value $pc 'provisioningPolicyId') -ne $script:S.Config.PolicyId) { throw 'Cloud PC provisioning policy does not match the migration plan.' }
         if ($row.UsageStatus -ne 'inUse') { Write-CpcLog "$($row.VM): snapshot consumption is NOT confirmed by current Graph usage status. Validation relies on the operator's independent source/data verification; the imported artifact may have been cleaned up." }
         $row.ValidatedUtc = [datetime]::UtcNow.ToString('o'); $row.Phase = 'Validated'; Save-CpcState
@@ -1749,17 +2061,33 @@ function Complete-CpcValidation($Rows) {
 }
 
 function Assert-CpcNoProvisioning($Row) {
-    $user = Invoke-CpcGraph -Path "/v1.0/users/$($Row.UserId)?`$select=id,userPrincipalName,assignedLicenses"
-    if ((Get-Value $user 'id') -ne $Row.UserId -or (Get-Value $user 'userPrincipalName') -ne $Row.UserPrincipalName) { throw 'Target user identity changed; recovery blocked.' }
+    $unresolved = -not (Get-Value $Row 'UserId')
+    if ($unresolved) {
+        $draft = $Row.Clone(); $draft.Phase = 'Abandoned'
+        if ($Row.Phase -notin @('Mapped','Abandoned') -or -not (Test-CpcAbandonedDraftReset $draft)) { throw 'Missing immutable user identity on a non-draft attempt; recovery blocked.' }
+        if ($Row.UserPrincipalName -notmatch '^[^@\s]+@[^@\s]+$') { throw 'Invalid draft UPN; recovery blocked.' }
+    }
+    $lookup = if ($unresolved) { [uri]::EscapeDataString($Row.UserPrincipalName) } else { [uri]::EscapeDataString($Row.UserId) }
+    $user = Invoke-CpcGraph -Path "/v1.0/users/${lookup}?`$select=id,userPrincipalName,assignedLicenses"
+    $id = [guid]::Empty
+    if (-not [guid]::TryParse([string](Get-Value $user 'id'), [ref]$id) -or $id -eq [guid]::Empty -or
+        (-not $unresolved -and $id.ToString() -ne $Row.UserId) -or (Get-Value $user 'userPrincipalName') -ne $Row.UserPrincipalName -or
+        '__missing__' -eq (Get-Value $user 'assignedLicenses' '__missing__')) { throw 'Target user identity changed or license evidence missing; recovery blocked.' }
     $skus = @(Get-CpcGraphCollection '/v1.0/subscribedSkus')
     $ids = @($skus | Where-Object { ((Get-Value $_ 'skuPartNumber' '') + ',' + ((Get-Value $_ 'servicePlans' @() | ForEach-Object { Get-Value $_ 'servicePlanName' '' }) -join ',')) -match '(?i)CLOUDPC|WINDOWS[_ ]?365|CPC_' } | ForEach-Object { $_.skuId }) + @($script:S.Config.SkuId)
     if (@((Get-Value $user 'assignedLicenses' @()) | Where-Object { $_.skuId -in $ids }).Count -or
-        @(Get-CpcGraphCollection "$script:Endpoint/cloudPCs" | Where-Object { (Get-Value $_ 'userId') -eq $Row.UserId -or (Get-Value $_ 'userPrincipalName') -eq $Row.UserPrincipalName }).Count) { throw 'A Cloud PC or Windows 365 license exists. Pre-license artifact removal is unsafe and blocked.' }
+        @(Get-CpcCloudPcs @(@{ UserId = $id.ToString(); UserPrincipalName = $Row.UserPrincipalName })).Count) { throw 'A Cloud PC or Windows 365 license exists. Pre-license artifact removal is unsafe and blocked.' }
+    if ($unresolved) {
+        $Row.UserId = $id.ToString()
+        Save-CpcState # Identity must be durable before any recovery effect.
+        $script:S.Preflight.Remove($Row.VmId)
+    }
 }
 
 function Remove-CpcAttemptArtifacts($Row, [string]$PendingPhase) {
     # Two-pass, ownership-checked, restartable removal. Absence never hides a
     # permission/network failure: list calls must succeed, and writes are not retried.
+    if (-not $Row.SnapshotName -and -not $Row.SnapshotId -and -not $Row.VhdBlob -and -not $Row.VmgsBlob -and -not $Row.VhdCopyId -and -not $Row.VmgsCopyId) { return }
     $snapshots = @(Get-AzSnapshot -ResourceGroupName $script:S.Config.SnapshotResourceGroup | Where-Object Name -EQ $Row.SnapshotName)
     if ($snapshots.Count -gt 1) { throw 'Ambiguous snapshot listing.' }
     if ($snapshots.Count) {
@@ -1839,8 +2167,9 @@ function Reset-CpcCapture($Rows, [switch]$Abandon) {
         $history = @{}; foreach ($key in @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStatus','CaptureStartedUtc','ImportStartedUtc')) { $history[$key] = Get-Value $row $key }
         $history.ClosedUtc = [datetime]::UtcNow.ToString('o')
         $row.AttemptHistory = @(Get-Value $row 'AttemptHistory' @()) + @($history)
-        foreach ($key in @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','SourceVmUniqueId','SourceDiskId','CaptureStartedUtc','ImportId','ImportStatus','UsageStatus','ImportStartedUtc','ExportExpiresUtc','ImportSasExpiresUtc')) { $row[$key] = '' }
+        foreach ($key in @('SnapshotId','SnapshotName','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','SourceVmUniqueId','SourceDiskId','SourceDiskUniqueId','CaptureStartedUtc','ImportId','ImportStatus','UsageStatus','ImportStartedUtc','ExportExpiresUtc','ImportSasExpiresUtc')) { $row[$key] = '' }
         $row.ArtifactRemovalApproved = $false; $row.LastError = ''; $row.Readiness = 'NotChecked'; $row.Attested = $false
+        $row.Guest = $null; $row.ObservedSourceVmUniqueId = ''; $row.ObservedSourceDiskId = ''
         $row.Phase = if ($Abandon) { 'Abandoned' } elseif ($script:S.GroupId -and $script:S.UserSettingId) { 'IdentityPrepared' } else { 'Mapped' }
         Save-CpcState
     }
@@ -1860,7 +2189,8 @@ function Remove-CpcStaging($Rows) {
 }
 
 function Export-CpcReport([string]$Directory) {
-    $null = [IO.Directory]::CreateDirectory($Directory)
+    $Directory = Assert-CpcPrivatePath $Directory -Directory -Create
+    foreach ($name in @('migration-results.csv','prerequisites.json','graph-results.redacted.json','activity.log','migration-report.html')) { $null = Assert-CpcPrivatePath (Join-Path $Directory $name) }
     $rows = @($script:S.Rows | ForEach-Object { [pscustomobject]$_ })
     # Protect against spreadsheet formula injection; JSON preserves exact values.
     $csvRows = foreach ($r in $rows) {
@@ -1882,7 +2212,7 @@ function Export-CpcReport([string]$Directory) {
         $label = [net.webutility]::HtmlEncode($g.Name)
         "<div class='bar'><strong>$label ($($g.Count))</strong><meter min='0' max='$([math]::Max(1,$rows.Count))' value='$($g.Count)'></meter></div>"
     }
-    $table = ($rows | Select-Object VM,UserPrincipalName,Phase,Readiness,ImportStatus,CloudPcStatus,LastError | ConvertTo-Html -Fragment) -join "`n"
+    $table = ($rows | Select-Object VM,UserPrincipalName,Phase,Readiness,ImportStatus,CloudPcStatus,LastError,ImportLookupWarning | ConvertTo-Html -Fragment) -join "`n"
     $checks = ($script:S.Checks | ConvertTo-Html -Fragment) -join "`n"
     $html = "<!doctype html><html><head><meta charset='utf-8'><title>Windows 365 migration</title><style>body{font:15px Segoe UI;background:#f4f7fb;color:#16243c;margin:32px}table{border-collapse:collapse;width:100%;background:white}td,th{border:1px solid #dde4ee;padding:9px;text-align:left}h1{color:#185abd}.bar{padding:8px}meter{width:50%;margin-left:20px}</style></head><body><h1>Windows 365 migration report</h1><p>UTC $([datetime]::UtcNow.ToString('o')) | Plan $($script:S.PlanId)</p><p>Import success is not proof of successful cutover. Validated means operator-confirmed. Contains tenant/user identifiers; handle as sensitive.</p>$($bars -join '')<h2>Migration state</h2>$table<h2>Prerequisites</h2>$checks</body></html>"
     [IO.File]::WriteAllText((Join-Path $Directory 'migration-report.html'), $html)
@@ -1906,9 +2236,14 @@ function Invoke-CpcOperation {
         if (($Action -in @('Prepare','RepairSnapshot','Capture','Import','License','Validate','Purge','Cleanup','RevokeExport','UseImage','ReconcileImport','ReconcileLicense','ResetCapture','Abandon') -or ($Action -eq 'Refresh' -and @($script:S.Rows | Where-Object Phase -EQ 'Copying').Count)) -and -not $script:S.StatePath) {
             throw 'Save the plan before mutations; an automatic operation journal is required.'
         }
-        Write-CpcAudit 'OperationStart' @{ Action = $Action; VmIds = @(Get-Value $Data 'VmIds' @()) }
+        if ($script:PersistenceFault -and $Action -notin @('RestorePersistence','Save','Export','LocalCheck')) {
+            throw 'Journal/log persistence is faulted. Use Restore journal writes; review server outcomes before continuing.'
+        }
+        if ($Action -in @('Guest','Prepare','RepairSnapshot','Capture','Import','License','Validate','Purge','Cleanup','RevokeExport','UseImage','ReconcileImport','ReconcileLicense','ResetCapture','Abandon')) { Assert-CpcPersistenceReady }
+        if ($Action -ne 'RestorePersistence') { Write-CpcAudit 'OperationStart' @{ Action = $Action; VmIds = @(Get-Value $Data 'VmIds' @()) } }
         switch ($Action) {
-            'InitializeLogging' { Initialize-CpcLogging ([string](Get-Value $Data 'Directory' $PSScriptRoot)) }
+            'RestorePersistence' { Restore-CpcPersistence }
+            'InitializeLogging' { Initialize-CpcLogging ([string](Get-Value $Data 'Directory' '')) }
             'LocalCheck' { Test-CpcLocal }
             'Install' {
                 foreach ($m in $script:Modules) {
@@ -1951,8 +2286,10 @@ function Invoke-CpcOperation {
             'License' {
                 try { Start-CpcLicense (Get-CpcSelected $Data) }
                 finally {
-                    try { Update-CpcLicenseCatalog }
-                    catch { Write-CpcLog "License-count refresh failed; catalog cleared. $($_.Exception.Message)" }
+                    if (-not $script:PersistenceFault) {
+                        try { Update-CpcLicenseCatalog }
+                        catch { Write-CpcLog "License-count refresh failed; catalog cleared. $($_.Exception.Message)" }
+                    }
                 }
             }
             'Validate' { Complete-CpcValidation (Get-CpcSelected $Data) }
@@ -2009,7 +2346,7 @@ function Invoke-CpcOperation {
                 if (-not (Test-CpcImportUserIdentity $r $rows[0])) { throw 'Import belongs to another user.' }
                 $filename = ($rows[0].VhdBlob -split '/')[-1]
                 if ((Get-Value $r 'filename') -notin @($rows[0].VhdBlob, $filename, [IO.Path]::GetFileNameWithoutExtension($filename))) { throw 'Unique import filename mismatch. Escalate for manual correlation.' }
-                if ([datetime](Get-Value $r 'startDateTime') -lt [datetime]$rows[0].ImportStartedUtc) { throw 'Import predates this attempt.' }
+                if ((ConvertTo-CpcUtcInstant (Get-Value $r 'startDateTime')) -lt (ConvertTo-CpcUtcInstant $rows[0].ImportStartedUtc)) { throw 'Import predates this attempt.' }
                 $rows[0].ImportId = $Data.ImportId; $rows[0].Phase = 'Importing'; Save-CpcState
                 Update-CpcStatus $rows
             }
@@ -2046,7 +2383,7 @@ function Invoke-CpcOperation {
                     if ($r.VmId -notlike "/subscriptions/$($script:S.SubscriptionId)/resourceGroups/*/providers/Microsoft.Compute/virtualMachines/*") { throw 'Plan contains an out-of-scope VM.' }
                     if (-not $vmIds.Add($r.VmId) -or $r.UserPrincipalName -notmatch '^[^@\s]+@[^@\s]+$' -or -not $upns.Add($r.UserPrincipalName)) { throw 'Plan has duplicate mappings or invalid user identities.' }
                     if ($r.VmId -ne "/subscriptions/$($script:S.SubscriptionId)/resourceGroups/$($r.ResourceGroup)/providers/Microsoft.Compute/virtualMachines/$($r.VM)") { throw 'Journal VM name/resource group does not match its ARM ID.' }
-                    foreach ($key in @('UserId','ImportId','CloudPcId')) { if (Get-Value $r $key) { $null = Assert-CpcGuid $r[$key] $key } }
+                    foreach ($key in @('UserId','ImportId','CloudPcId','ObservedCloudPcId')) { if (Get-Value $r $key) { $null = Assert-CpcGuid $r[$key] $key } }
                     if ($r.Phase -notin @('Mapped','IdentityPrepared','Capturing','CaptureFailed','Copying','CopyFailed','Staged','ImportSubmitting','ImportUnknown','Importing','Imported','ImportFailed','LicenseSubmitting','LicenseUnknown','Provisioning','Provisioned','Validated','CleanupPending','Cleaned','PurgeSubmitting','PurgeUnknown','Purged','ResettingCapture','Abandoning','Abandoned')) { throw 'Unknown journal phase; manual version/recovery review required.' }
                     if ($r.Phase -eq 'ImportSubmitting') { $r.Phase = 'ImportUnknown' }
                     if ($r.Phase -eq 'LicenseSubmitting') { $r.Phase = 'LicenseUnknown' }
@@ -2069,7 +2406,7 @@ function Invoke-CpcOperation {
         try { Write-CpcLog ("ERROR: " + $operationError) } catch { $operationError += ' Audit logging unavailable; stop further mutations until journal access is restored.' }
         # Failed candidate operations must not save partial/old state over a journal.
         if ($Action -notin @('Map','Load','Save','InitializeLogging')) {
-            try { Save-CpcState } catch { $operationError += ' Journal save failed. Reconcile server state before retrying any mutation.' }
+            try { Save-CpcState } catch { Set-CpcPersistenceFault $_.Exception.Message; $operationError += ' Journal save failed. Restore journal writes and reconcile server state before any mutation.' }
         }
     }
     $output = [pscustomobject]@{
@@ -2086,18 +2423,20 @@ function Invoke-CpcOperation {
         LogPath = $script:LogPath; LogLocationChanged = $script:LogLocationChanged
         Preflight = $script:S.Preflight
         OperationError = $operationError
+        PersistenceFault = $script:PersistenceFault
     }
     try {
-        # Persist every result listed in the UI: catalog, checks, rows, phase/status,
-        # configuration, and errors. Approval receipts remain session-only.
-        $listed = [ordered]@{ Action = $Action }
-        foreach ($key in @('Rows','Checks','Catalog','GraphResults','Config','Predecessors','Connected','GroupId','UserSettingId','PlanId','StatePath','TenantId','SubscriptionId','RequiredTenantId','LogPath','OperationError')) { $listed[$key] = $output.$key }
+        # Allowlisted summary, not another copy of directory/catalog data,
+        # raw Graph responses, guest evidence or recovery journal contents.
+        $listed = [ordered]@{ Action = $Action; RowCount = $script:S.Rows.Count; CheckCount = $script:S.Checks.Count; HasError = [bool]$output.OperationError }
         Write-CpcSessionRecord 'DisplayedResult' $listed
         if ($script:LogStream -and $Action -notin @('Map','Load','Save')) { Save-CpcState }
     } catch {
+        Set-CpcPersistenceFault $_.Exception.Message
         $output.OperationError += ' Log/journal persistence failed: ' + (Protect-CpcText $_.Exception.Message) + ' Stop and restore write access before continuing.'
     }
+    $output.PersistenceFault = $script:PersistenceFault
     return $output
 }
 
-Export-ModuleMember -Function Invoke-CpcOperation,Protect-CpcText,New-CpcImportBody,Test-CpcPermission,Get-Value,ConvertTo-CpcLicenseCatalog
+Export-ModuleMember -Function Invoke-CpcOperation,Protect-CpcText,New-CpcImportBody,Test-CpcPermission,Get-Value,ConvertTo-CpcLicenseCatalog,Assert-CpcPrivatePath,Get-CpcDataDirectory

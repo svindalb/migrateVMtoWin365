@@ -3,6 +3,7 @@ Set-StrictMode -Version 3.0
 
 function Get-CpcConfirmationText([string]$Action, $State, $Rows, $Data = @{}) {
     $effects = @{
+        RestorePersistence = 'LOCAL RECOVERY ONLY: flush the current in-memory plan to its journal and verify audit/session-log writes. Clears stage approvals. No Azure/Graph operation is retried. Review prior server outcomes, Refresh, and Validate again before proceeding.'
         Connect = 'Sign in to Azure and Microsoft Graph for the tenant/subscription below. Consent may be requested. No migration resources are created.'
         DetectSubscriptions = 'Sign in to Azure for the specified tenant and list enabled accessible subscriptions (names and IDs). Graph is not connected yet. Clear old resource inventory; explicitly select a subscription and connect before discovering resource groups/VMs. No cloud resources are changed.'
         FindGroups = 'Read direct group memberships for every checked VM target user and intersect them with direct assignments on the selected Enterprise dedicated provisioning policy. Show candidate group names and IDs; the admin must select one explicitly. No membership, settings or policy is changed.'
@@ -36,7 +37,7 @@ function Get-CpcConfirmationText([string]$Action, $State, $Rows, $Data = @{}) {
             $reuseId = if ($config -is [collections.IDictionary]) { $config['ReusableUserSettingId'] } else { $null }
             $effect = if ($reuseId) { "ENTIRE GROUP: claim the single compatible setting already assigned only to this selected group and ensure provisioningSourceType=snapshot. Setting: $($config['ReusableUserSettingName']) [$reuseId]; current source: $($config['ReusableUserSettingSource']). Confirm the previous migration is complete/safely abandoned and its journal is intentionally unavailable. An orphan snapshot setting can represent unfinished work. No new setting, membership, policy assignment or license is created." } else { 'ENTIRE GROUP: create a plan-owned SNAPSHOT user setting and assign it to the explicitly selected existing user group. All group members must be mapped and selected. The group must already be assigned to the selected Enterprise dedicated policy. Existing group membership and policy assignments are NOT modified. Users receive the setting through group membership, not direct user assignment. Use an exclusive administration window and wait for propagation; no license assigned.' }
         }
-        if ($Action -eq 'RepairSnapshot') { $effect = 'ENTIRE BATCH / EXISTING GROUP: restore snapshot mode and assignment on this plan-owned user setting only. Revalidate the selected existing group, exact mapped membership and Enterprise policy assignment. No group membership or policy assignments are repaired automatically; correct these in Intune/Entra first. No import or license write. All attestations/approvals are invalidated; re-attest and validate after propagation.' }
+        if ($Action -eq 'RepairSnapshot') { $effect = 'ENTIRE BATCH / EXISTING GROUP: verify snapshot mode and assignment on this plan-owned user setting. A healthy no-op preserves evidence and submits no mutation. An actual repair invalidates attestations/approvals; re-attest and validate after propagation. Revalidate the selected existing group, exact mapped membership and Enterprise policy assignment. No group membership or policy assignments are repaired automatically; correct those in Intune/Entra first. No import or license write.' }
     }
     $lines = [collections.generic.list[string]]::new()
     $lines.Add("ACTION: $Action`r`n$effect`r`n")
@@ -46,7 +47,7 @@ function Get-CpcConfirmationText([string]$Action, $State, $Rows, $Data = @{}) {
     foreach ($row in @($Rows)) {
         $view = [ordered]@{}
         foreach ($key in @('VM','Name','VmId','Id','ResourceGroup','Location','UserPrincipalName','UserDisplayName','UserId','Phase','Readiness','CheckedUtc',
-            'SourceVmUniqueId','SourceDiskId','ObservedSourceVmUniqueId','ObservedSourceDiskId','SnapshotName','SnapshotId','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStatus','UsageStatus','CloudPcId','CloudPcName','CloudPcStatus','LastError')) {
+            'SourceVmUniqueId','SourceDiskId','SourceDiskUniqueId','ObservedSourceVmUniqueId','ObservedSourceDiskId','SnapshotName','SnapshotId','VhdBlob','VmgsBlob','VhdCopyId','VmgsCopyId','ImportId','ImportStatus','UsageStatus','ObservedCloudPcId','CloudPcId','CloudPcName','CloudPcStatus','LastError','ImportLookupWarning')) {
             $value = if ($row -is [collections.IDictionary]) { $row[$key] } elseif ($row.PSObject.Properties[$key]) { $row.$key } else { $null }
             $view[$key] = if ([string]::IsNullOrEmpty([string]$value)) { '(not yet resolved / created)' } else { $value }
         }

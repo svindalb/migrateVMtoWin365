@@ -1,5 +1,6 @@
 #requires -Version 7.2
 Set-StrictMode -Version 3.0
+Import-Module (Join-Path $PSScriptRoot 'CpcMigration.Core.psm1')
 
 function Assert-JournalLocalPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
@@ -72,6 +73,8 @@ function Get-CpcJournalInventory {
 function Move-CpcJournalToArchive {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ExpectedFingerprint, [string]$CurrentPlanId = '')
     $full = Assert-JournalLocalPath $Path
+    $null = Assert-CpcPrivatePath $full
+    foreach ($sidecar in @("$full.lock", "$full.events.jsonl", "$full.events.jsonl.1")) { $null = Assert-CpcPrivatePath $sidecar }
     $pathLease = $null; $planLease = $null; $destination = ''; $moved = [collections.generic.list[object]]::new()
     try {
         # Same order and lock names as the migration engine; retained until all
@@ -90,7 +93,7 @@ function Move-CpcJournalToArchive {
         $planLease = [IO.File]::Open((Join-Path $lockFolder "$(([guid]$s.PlanId).ToString()).lock"), 'OpenOrCreate', 'ReadWrite', 'None')
         $archiveRoot = Assert-JournalLocalPath (Join-Path ([IO.Path]::GetDirectoryName($full)) 'JournalArchive')
         $destination = Join-Path $archiveRoot ([datetime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
-        $null = [IO.Directory]::CreateDirectory($destination)
+        $null = Assert-CpcPrivatePath $destination -Directory -Create
         # Move audit evidence first and journal last. Session logs deliberately
         # stay put: Save As / Load means they can cover multiple journal paths.
         foreach ($source in @("$full.events.jsonl.1", "$full.events.jsonl", $full)) {

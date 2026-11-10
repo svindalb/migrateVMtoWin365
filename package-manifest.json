@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "audience": "GitHub upload set: runtime, offline tests and current operator documentation. Existing command launcher intentionally excluded; no operational evidence or internal handoff history.",
+  "files": [
+    ".gitignore",
+    "CpcMigration.Confirmation.psm1",
+    "CpcMigration.Core.psm1",
+    "CpcMigration.Journals.psm1",
+    "CpcMigration.Journals.xaml",
+    "CpcMigration.Workflow.psm1",
+    "CpcMigration.xaml",
+    "Start-CpcMigration.ps1",
+    "README.md",
+    "docs/OPERATOR-GUIDE.md",
+    "docs/SECURITY-AND-RECOVERY.md",
+    "tests/Test-Journals.ps1",
+    "tests/Test-Logging.ps1",
+    "tests/Test-Offline.ps1",
+    "tests/Test-Recovery.ps1",
+    "tests/Test-Workflow.ps1",
+    "tests/Test-Package.ps1",
+    "package-manifest.json"
+  ]
+}

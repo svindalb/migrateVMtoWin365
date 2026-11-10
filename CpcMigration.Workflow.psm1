@@ -52,6 +52,10 @@ function Get-CpcActionAvailability {
     $all = @(Get-WorkflowValue $State 'Rows' @())
     $rowsToCheck = @($Rows)
     if ($Busy) { $reason = 'Wait for the current operation to finish. Server-side work may continue afterward; use Refresh status.' }
+    elseif ($Action -eq 'RestorePersistence') {
+        if (-not (Get-WorkflowValue $State 'PersistenceFault')) { $reason = 'No persistence fault is recorded.' }
+    }
+    elseif (Get-WorkflowValue $State 'PersistenceFault') { $reason = 'Journal/log writes failed. Use Restore journal writes before remote work. No cloud operation will be replayed automatically.' }
     elseif (-not (Get-WorkflowValue $State 'Connected' $false)) { $reason = 'Connect the intended tenant and subscription first.' }
     elseif ($Action -eq 'Load') {
         if ($all.Count) { $reason = 'A plan is already open. Restart, connect, then Resume / load journal before creating mappings.' }
@@ -135,6 +139,7 @@ function Get-CpcActionAvailability {
 
 function Get-CpcWorkflowHint {
     param($State, [object[]]$Rows = @(), [datetimeoffset]$Now = [datetimeoffset]::UtcNow)
+    if (Get-WorkflowValue $State 'PersistenceFault') { return 'Journal/log writes failed. Restore journal writes, review server outcomes, then Refresh and revalidate. No operation is replayed automatically.' }
     if (-not $Rows.Count) { return 'Select migration rows using their Use checkboxes. Resuming? Connect, then Resume / load journal; do not create new mappings for an existing migration.' }
     if (@($Rows | Where-Object { (Get-WorkflowValue $_ 'VmId') -in @(Get-WorkflowValue $State 'ResumePendingVmIds' @()) }).Count) { return 'Journal restored: Refresh status for checked rows first. Saved stages may be stale. Resolve any refresh errors, then follow the next step. Do not repeat completed capture/import/license operations.' }
     $stages = @($Rows | ForEach-Object { Get-WorkflowStage $_ } | Select-Object -Unique)
