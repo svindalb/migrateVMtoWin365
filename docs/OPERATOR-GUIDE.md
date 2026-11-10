@@ -1,6 +1,6 @@
 # Migration Workbench — complete operator guide
 
-This is the tab-by-tab reference for the standalone Azure VM → Windows 365 PowerShell/WPF workbench. Control names in parentheses identify the matching source control for maintenance; operators use the visible labels. Reviewed against the interface and handlers on **2026-09-17**.
+This is the tab-by-tab reference for the standalone Azure VM → Windows 365 PowerShell/WPF workbench. Control names in parentheses identify the matching source control for maintenance; operators use the visible labels. Updated for the **2026-11-10** revision, including persistence recovery, current diagnostic summaries, private file pickers and synchronized row details. For the dated pilot evidence and limitations, see the [README status](../README.md#status).
 
 **Read before operating:** [README: supported scope, setup and permissions](../README.md#supported-scope-and-deliberate-restrictions). This is a controlled pilot using Graph beta, not a supported production migration product. No MCP or hosted server is required. Import success and a provisioned Cloud PC are **not proof that the correct data was restored**.
 
@@ -53,6 +53,7 @@ Start here: **[Simple button reference — what it does and when to use it](#sim
 | Button/control | Simply put | When to use |
 |---|---|---|
 | **Save journal as... (optional)** | Changes where the whole recovery plan is saved. | Only if you want another protected location. The app already saves automatically. |
+| **Restore journal writes** | Verifies local journal, audit and session-log writes after a persistence fault; clears approvals, never replays cloud calls. | After resolving storage/access problems, then Refresh and revalidate. |
 | **Load journal** | Opens the same saved-plan manager as Resume. | In a fresh connected session with no draft already open. Load the original plan, not an exported report. |
 | **Export HTML / CSV / JSON** | Writes reports for the whole plan and current session evidence. | When you need a progress record, troubleshooting evidence or final report. Select a separate folder to avoid replacing older reports. |
 | **Refresh status** | Checks cloud progress and updates the plan. Also revokes snapshot export when all staging copies finish. | First after loading, and while waiting for Copying → Staged, Importing → Imported or Provisioning → Provisioned. Never starts the next stage. |
@@ -66,7 +67,7 @@ Start here: **[Simple button reference — what it does and when to use it](#sim
 | **7 Start migration / assign license** | Assigns the selected license and starts Cloud PC provisioning. | At **Imported**, after License validation. Consumes seats/can incur costs. Wait for **Provisioned**. |
 | **8 Validate cutover (final)** | Records that **you and the user checked the new Cloud PC and its migrated data/apps**. | At **Provisioned**, after sign-in and acceptance testing—not merely because Graph reports success. Different from step 3. |
 | **9 Cleanup staging** | Permanently deletes this plan's Azure staging blobs and managed snapshots. | After final validation and retention/backup approval, or to continue interrupted CleanupPending. Keeps the source VM and Cloud PC. |
-| **Repair snapshot setting + assignments (batch)** | Repairs this plan's snapshot setting/matching group assignment. | Only if that prepared configuration needs repair and all rows are in an allowed pre-license phase. Not a provisioning retry. Affects **all rows** and clears attestation/approval. Existing-group membership/policy issues must be fixed separately. |
+| **Repair snapshot setting + assignments (batch)** | Checks/repairs this plan's snapshot setting/matching group assignment. | Only in allowed pre-license phases; not a provisioning retry. Affects **all rows**. A healthy no-op preserves evidence and submits no mutation; an actual repair clears attestation/approval. Existing-group membership/policy issues must be fixed separately. |
 
 **Tabs 4 (Prerequisite results) and 6 (Activity log) have no action buttons.** Read their results/logs, then return to the relevant tab to act. Their text fields are read-only.
 
@@ -82,11 +83,11 @@ Start here: **[Simple button reference — what it does and when to use it](#sim
 | **Reconcile unknown import ID** | Links the actual existing import to a row whose submission result was uncertain. | Exactly one **ImportUnknown** row. Enter the real **W365 import snapshot GUID** in the adjacent box—not an Azure resource/copy ID. No new import is submitted. |
 | **Reset failed / purged capture** | Deletes verified terminal Azure artifacts and prepares the row for a new capture attempt. | For reviewed **pre-license** recovery, or continuing ResettingCapture. No pending copies/live or unknown import/license/Cloud PC. Does not restart the source. |
 | **Abandon + remove owned artifacts** | Deletes verified terminal Azure artifacts and marks the attempt abandoned. | When ending a safe **pre-license** attempt, or continuing Abandoning. Not a rollback of a provisioned Cloud PC. |
-| **Reconcile license (no write)** | Checks and records evidence of an uncertain license assignment without assigning again. | Exactly one **LicenseUnknown** row. **Both boxes are required:** reviewed audit reference **and actual assignment time** with a time zone. Not for an ordinary provisioning failure. |
+| **Reconcile license (no write)** | Checks and records evidence of an uncertain license assignment without assigning again. | Exactly one **LicenseUnknown** row. **Both boxes are required:** reviewed audit reference **and actual assignment time** with a time zone. Missing service creation evidence still blocks this path; see [API limitations](SECURITY-AND-RECOVERY.md#api-and-validation-limitations). Not for an ordinary provisioning failure. |
 
 **Do not use any recovery button simply because it is enabled.** Read the detailed [recovery restrictions and input examples](#tab-5--dashboard--graph). Preserve the original journal and never guess IDs/times or edit its phase to bypass checks.
 
-### Saved migration journals dialog
+### Saved-plan manager buttons
 
 | Button/control | Simply put | When to use |
 |---|---|---|
@@ -188,7 +189,7 @@ For first launch/runtime/signing and exact permissions, see [README: Start](../R
 | **Find groups for selected users + policy** (`FindGroupsButton`) | Requires checked VMs, entered UPNs and a selected dedicated policy. Commits grid edits, resolves users, reads common direct memberships already directly assigned to that policy. Read-only in cloud; no group/assignment repair. |
 | User-group dropdown (`UserGroupPicker`) | Explicitly choose the correct returned **name and ID**, even with one result. The group must contain exactly the mapped users as direct members; every member receives the snapshot setting. A broader unrelated-user group is unsafe. |
 | User-group guidance (`UserGroupHint`) | Explains selection and policy requirements. Changing policy invalidates candidates; rerun group discovery after changing users/policy. Membership is rechecked at mapping/validation. |
-| **Create / update draft mappings** (`MapButton`) | Requires complete Tab 1 destination settings, eligible SKU, checked source rows/unique UPNs and selected group. Reviews the entire checked inventory including hidden rows, then creates/replaces **only an unprepared local draft** and persists it. No VM stop, import or licensing. Previous attestation/validation no longer applies. Prepared or overlapping locally recorded migrations block replacement: resume their original journal instead. |
+| **Create / update draft mappings** (`MapButton`) | Requires complete Tab 1 destination settings, eligible SKU, checked source rows/unique UPNs and selected group. Reviews the entire checked inventory including hidden rows, then creates/replaces **only an unprepared local draft** and persists it. No VM stop, import or licensing. Previous attestation/validation no longer applies. An overlapping unfinished plan blocks mapping and must be resumed. If every row in each overlapping prior plan is `Cleaned`/`Abandoned`, a separate default-No dialog can authorize a new migration cycle. Yes preserves those journals, records them as predecessors and continues only after core revalidates their fingerprint, scope, plan identity, terminal state and source overlap. It does not bypass live cloud checks. |
 
 **Group boundaries:** no extra users, nested/dynamic/synced groups, unsupported/filtered assignment targets or inherited group licensing. The selected group must already be assigned to the intended policy. The app does not alter membership/policy assignments for new existing-group plans. Resolve prerequisites with the authorized Entra/Intune admin, not by guessing another group or deleting a conflicting setting.
 
@@ -198,7 +199,8 @@ For first launch/runtime/signing and exact permissions, see [README: Start](../R
 
 | Button/input | Purpose and required scope |
 |---|---|
-| **Save journal as... (optional)** (`SaveButton`) | Saves the whole plan to a trusted writable JSON path and switches the active journal there. Automatic journaling already runs; this is not a required step before each action. The session log stays at its startup location. Save As is not a second independent migration and cannot overwrite a different plan. |
+| **Save journal as... (optional)** (`SaveButton`) | Opens in the executing user's **LocalAppData → CpcMigration → data**. Saves the whole plan to a trusted private local JSON path (restrictive ACLs required) and switches the active journal there only after confirmation and successful save. Automatic journaling already runs; this is not required before each action. The session log stays at startup location. Save As is not an independent migration and cannot overwrite a different plan. |
+| **Restore journal writes** (`RestorePersistenceButton`) | Local-only recovery after a latched persistence fault. Reopens the same existing log, verifies flushed journal/read-back and audit/log writes, then clears approvals. No selection or cloud connection required. Failure remains blocking; success requires Refresh/revalidation and independent review of any already-submitted operation. Save As alone does not clear a fault. |
 | **Load journal** (`LoadButton`) | Same manager/resume flow as Tab 1. Fresh connected session, no mappings already open, matching tenant/subscription and trusted original journal required. |
 | **Export HTML / CSV / JSON** (`ExportButton`) | Exports the whole current plan/checks and session Graph/log data, not just checked rows. The HTML file dialog effectively selects a **directory**; the engine writes fixed report names there, even if a different HTML basename was entered. Existing reports with those names may be replaced. It is not a resumable journal. See [file dialogs](#confirmation-result-and-file-dialogs). |
 | **Refresh status** (`RefreshButton`) | Requires Use-checked rows and a connection. Reads copy/import/Cloud PC state and saves results. **Not entirely cloud-read-only:** when every owned staging copy is complete, revokes snapshot export access before advancing to Staged. Does not recapture/reimport/license. Review Last error if phase does not advance. |
@@ -219,7 +221,7 @@ These are not nine buttons to click once in a row. **Step 3 is repeated for each
 | **7 Start migration / assign license** (`LicenseButton`) | Imported + License approval, live successful unused matching import, retained staging and valid user/policy/settings/license checks. Assigns the chosen exact SKU. | Consumes seats/can incur costs and starts Cloud PC provisioning. Provisioning → Refresh until Provisioned. Does not remove existing licenses. Unknown outcome requires audit recovery, never another blind assignment. |
 | **8 Validate cutover (final)** (`ValidateButton`) | Provisioned, recorded successful import and license history; independent user/data validation completed. Verifies live Cloud PC identity/policy/status and records operator acceptance/time. | Becomes Validated. No new preflight from step 3 is required for this final action. This is **not** a substitute for signing in and checking restored content. No source restart/delete. |
 | **9 Cleanup staging** (`CleanupButton`) | Validated or restartable CleanupPending with recorded acceptance; retention/backup requirements met. Deletes **owned Azure VHD/VMGS blobs and managed snapshots**. | Permanent deletion; normally Cleaned. Leaves source VM, Cloud PC, licenses, group, policy and user setting. Does not purge the W365 import or archive/delete the journal. |
-| **Repair snapshot setting + assignments (batch)** (`RepairSnapshotButton`) | Entire plan; owned prepared setting/group required, no provisioning/license/Cloud PC conflicts. UI accepts Mapped/IdentityPrepared/Staged/Imported/CaptureFailed only; live checks remain authoritative. Repairs snapshot mode and this setting's group assignment. | Whole-batch change even if one row checked. No import/license write and no existing-group membership/policy repair. Clears all attestations/approvals; wait, re-attest, validate. Does **not** need passing migration preflight because it repairs some prerequisites. Legacy owned-group plans can repair their owned membership/policy assignment. |
+| **Repair snapshot setting + assignments (batch)** (`RepairSnapshotButton`) | Entire plan; owned prepared setting/group required, no provisioning/license/Cloud PC conflicts. UI accepts Mapped/IdentityPrepared/Staged/Imported/CaptureFailed only; live checks remain authoritative. Verifies/repairs snapshot mode and the setting's group assignment. | Whole-batch scope even if one row checked. A healthy existing-group no-op preserves evidence and submits no mutation. Actual repair clears attestations/approvals; wait, re-attest, validate. No import/license or existing-group membership/policy write. Does **not** require passing migration preflight. Legacy owned-group plans retain owned membership/policy repair. |
 
 ### What the Attest dialog asks you to verify
 
@@ -249,10 +251,11 @@ The checklist is a confirmation, not nine editable settings or automated fixes. 
 | **Readiness** | Validation result such as NotChecked/Ready/Blocked. Ready is not completion and does not outlive an expired/consumed approval. |
 | **Guest assessed (recorded)** | Collection timestamp of saved guest evidence, not the most recent cloud poll/validation time. |
 | **Import** | Last accepted import status, such as inProgress/succeeded/failed. On lookup failure, historical status may remain; read Last error. |
-| **Cloud PC** | Last observed service provisioning status. Provisioned is not proof of user/data acceptance. |
+| **Cloud PC** | Last observed service provisioning status. Before licensing, an existing PC is a blocking observation (`ObservedCloudPcId`), not a new migration binding. Verified absence can clear obsolete pre-license observations; post-license identity remains protected. Provisioned is not proof of user/data acceptance. |
 | **Detail / copy progress** | OS VHD and VMGS byte counts/statuses, or returned import detail. One small successful VMGS artifact does not mean the OS VHD finished. No invented import/provisioning percentage. |
 | **Last error** | Last operation/status-read problem for this row. An old phase can be retained after a failed read; do not infer a failed import from a lookup error. |
-| JSON inspector below grid (`RowJson`) | **Read-only, copyable** evidence/IDs for the highlighted row, including guest and artifact identifiers. No input is required. It is not a journal editor. |
+| **Import lookup warning** | A missing historical import (404) with matching post-license evidence. Visible and retained, but not a fresh successful import or proof of consumption/data restoration. Other errors still block the post-load refresh gate. |
+| JSON inspector below grid (`RowJson`) | **Read-only, copyable** latest applied row evidence/IDs, including guest and artifact identifiers. Follows the highlighted VM by resource ID when results replace rows and clears on deselection/removal. This is a UI serialization, not a live journal-file reader/editor. `StatusRefreshSucceeded` and `GuestAssessmentText` are output/UI fields. Highlighting does not change Use targets. |
 
 ## Tab 4 — Prerequisite results
 
@@ -279,13 +282,13 @@ Read all failures plus manual items. Fix prerequisites through approved administ
 | **IMPORT SUCCEEDED** (`ImportedCard`) | Rows whose recorded ImportStatus is succeeded, including historical results after consumption. Not necessarily unused imports or completed migrations. |
 | **CUTOVER VALIDATED** (`ValidatedCard`) | Rows in Validated or Cleaned. Requires recorded operator acceptance. |
 | Phase chart (`ChartPanel`) | Counts of rows by phase for the whole plan. Not a byte/time percentage. |
-| Graph request grid (`GraphGrid`) | Read-only **UTC / Verb / Graph endpoint / Client request ID**. Select a request to inspect its response. Request time identifies the observation; a previously selected response is not necessarily the latest status. |
-| Graph response text (`GraphJson`) | Read-only copyable response for the highlighted request. No input needed. SAS query strings are redacted, but user IDs remain sensitive. API response success is not final cutover acceptance. |
+| Graph request grid (`GraphGrid`) | Read-only **UTC / Verb / masked Graph endpoint / Client request ID**. Select a request for its summary or bounded error. Request time identifies the observation, not current live state. |
+| Graph response text (`GraphJson`) | Copyable request summary/bounded redacted error; successful response bodies are no longer retained. No input needed. Error text may contain sensitive identifiers. API response success is not cutover acceptance. |
 | Recovery scope (`RecoveryScopeText`) | Identifies affected Migration **Use-checked** rows and whole-batch exceptions. Highlighting a Graph response does **not** change recovery targets. |
 
 ### Recovery buttons
 
-Use these only after establishing the actual server outcome. They are not alternate ways to skip the normal workflow. No automatic retries of ambiguous mutation requests are performed.
+Use these only after establishing the actual server outcome. They are not alternate ways to skip the normal workflow. The application does not explicitly replay ambiguous mutations and disables configured Graph HTTP retries at connection; this is not an exactly-once delivery guarantee across SDK/network/service behavior.
 
 | Button | Eligible scope, effect and cautions |
 |---|---|
@@ -295,7 +298,7 @@ Use these only after establishing the actual server outcome. They are not altern
 | **Reconcile unknown import ID** (`ReconcileButton`) | Exactly one Use-checked **ImportUnknown** row and the known nonzero import GUID in the adjacent box. Reads the existing result and verifies user, unique filename and attempt time before recording the ID/refreshing. No new import. Foreign/unverifiable evidence blocks; do not invent a matching filename or edit the journal. |
 | **Reset failed / purged capture** (`ResetCaptureButton`) | Guarded pre-license recovery: Mapped/IdentityPrepared/Capturing/CaptureFailed/Copying/CopyFailed/Staged/Purged, replay ResettingCapture with prior durable approval, or an Abandoned draft that never owned a group/setting and has no current or historical artifact evidence. Requires no live/unknown import, W365 license or Cloud PC, and terminal owned copies. **Deletes owned staging/snapshot artifacts** when present, archives attempt IDs, and resets toward IdentityPrepared/Mapped with approvals cleared. Never restarts source or silently overwrites blobs. |
 | **Abandon + remove owned artifacts** (`AbandonButton`) | Same pre-license/ownership/terminal-copy restrictions as reset, or replay Abandoning with prior approval. Deletes owned Azure artifacts, keeps attempt history and marks Abandoned rather than preparing a retry. Group/settings/policy remain. Not a rollback of provisioned Cloud PCs. |
-| **Reconcile license (no write)** (`ReconcileLicenseButton`) | Exactly one Use-checked **LicenseUnknown** row plus reviewed reference and actual assignment time. Checks the exact active direct SKU/user and a unique matching Cloud PC/policy/creation time using historical successful import evidence. Records attribution locally; **no license/import write**, and does not need the consumed-import lookup. No matching PC/evidence means investigate/wait, not retry assignment. |
+| **Reconcile license (no write)** (`ReconcileLicenseButton`) | Exactly one Use-checked **LicenseUnknown** row plus reviewed reference and actual assignment time. Checks the exact active direct SKU/directory user and a unique matching Cloud PC UPN/policy/creation time using historical successful import evidence. **Current limitation:** `createdDateTime` is not documented in the public Cloud PC schema; absent evidence blocks reconciliation with an explicit error. Latest provisioning time is not a substitute. Records attribution locally only after all checks; **no license/import write**, and does not need the consumed-import lookup. No matching PC/evidence means investigate, not retry assignment or edit phases. |
 
 Reset/abandon **reject pending copies even if their button is enabled**. Purge a terminal unused import first where applicable. Interrupted recovery must use the same action, not switch reset ↔ abandon to bypass its durable evidence. Use [README recovery boundaries](../README.md#safe-resetabandon-boundaries) for ownership and concurrency limits.
 
@@ -316,7 +319,7 @@ These fields are disabled outside the applicable single-row recovery phase. Whil
 | Paths (`LogLocationText`) | Read-only, selectable/copyable session-log and current recovery-journal paths. No value to enter. Verify which journal is active before closing or sharing evidence. |
 | Activity text (`LogBox`) | Read-only scrolling session activity/error history. Useful for tracing what was submitted versus merely observed. Not a command console; typing/pasting here does not run recovery. |
 
-Startup write-tests the script folder, then falls back to the executing user's Documents/MigrateLog with a notice. If neither location works, startup stops. Session logs persist across Save As/Load within that app run; the active journal switches. Adjacent bounded audit sidecars accompany journals. Logs/journals are not a full disk backup, and exported activity is not a replacement for the durable session log.
+Startup uses the executing user's **LocalAppData → CpcMigration → data**, with verified restrictive ACLs and real write/flush checks. There is no Documents/shared-folder fallback or automatic permission repair. Save As, Load, export and archive also enforce private paths. Session logs remain in their startup location, rotating at 5 MiB with three backups; audit sidecars have one backup. Diagnostic records are bounded to 64 KiB. Journals/reports remain sensitive and are not backups or anonymous data. See [security, persistence recovery and legacy paths](SECURITY-AND-RECOVERY.md).
 
 ## Saved migration journals dialog
 
@@ -335,7 +338,7 @@ Opened by Tab 1 **Resume / load journal**, **Manage saved journals / archive**, 
 
 Archive rechecks content fingerprints and holds journal-path/plan locks. Session logs and lock files stay where they are. Review the reported destination if archive fails; rollback is best-effort. Archive organizes files, **does not reclaim disk space**. Archived prepared history still participates in duplicate-source mapping checks; archiving/deleting history is not permission to remigrate.
 
-Discovery covers the script directory, Documents/MigrateLog and current journal directory; the manager can include their managed archive folders. Recognition is limited to supported JSON journals up to 32 MiB; malformed files are left untouched. Another directory requires Browse. Offline housekeeping can list unconnected startup journals, but cannot resume without connection. Protect archives like active journals; locks are local to the Windows user/workstation, not distributed.
+Discovery covers the new private default, legacy script directory/Documents/MigrateLog and current journal directory, including managed archives. It is read-only and does not migrate old files or repair permissions. Recognition is limited to supported JSON journals up to 32 MiB. A trusted journal in an insecure location needs an approved byte-preserving private copy with its audit sidecars before use; preserve history and never operate concurrent copies. Another directory requires Browse. Locks are local, not distributed.
 
 ## Confirmation, result and file dialogs
 
@@ -357,21 +360,23 @@ The detailed review displays action/risk, tenant/subscription, plan/journal, pol
 
 ### File selection and exports
 
-- **Save journal as...**: JSON save picker, default basename `migration-plan.json`; select a protected writable destination. Cancel leaves the current path unchanged. Existing foreign-plan/active-plan protections still apply after selection.
+- **Save journal as...**: JSON save picker, default basename `migration-plan.json`, initial folder **LocalAppData → CpcMigration → data**. It does not default to the script folder, loaded legacy journal's folder or last browsed destination. You may explicitly choose another protected writable destination; final privacy and foreign-plan/active-plan checks still apply. Cancel leaves the current path unchanged. If the private default is unavailable, the picker reports an error instead of falling back elsewhere.
 - **Browse another journal…**: JSON open picker; select the **original trusted journal**, not prerequisite/Graph report JSON. File-picker Open does not bypass load scope/ownership checks.
-- **Export HTML / CSV / JSON**: HTML save picker, default basename `migration-report.html`. **Only its directory is used**. The engine writes the following fixed names; use a new report folder per evidence snapshot to avoid replacement:
+- **Export HTML / CSV / JSON**: HTML save picker, default basename `migration-report.html`, initial folder **LocalAppData → CpcMigration → data**, with the same private-default/no-fallback behavior. **Only its directory is used**. The engine writes the following fixed names; use a new report folder per evidence snapshot to avoid replacement:
   - `migration-report.html`: phase summary, migration rows and prerequisites.
   - `migration-results.csv`: plan-row fields excluding nested Guest; formula-like text is escaped for spreadsheets.
   - `prerequisites.json`: recorded check evidence.
-  - `graph-results.redacted.json`: this session's captured Graph results.
+  - `graph-results.redacted.json`: this session's masked request summaries and bounded redacted errors, not successful response bodies.
   - `activity.log`: current in-memory activity export, separate from the automatic durable session log.
 - Reports contain sensitive identifiers. They do not contain authorization receipts and **cannot be loaded to resume**. The engine's fixed filenames/overwrite behavior are current behavior, not a selectable output-format checkbox.
+
+Opening a save picker does not relocate the automatic journal/log. Their actual paths are shown in the Activity log tab. Code updates apply on the next launch; do not interrupt active work for an update. Resume the original journal after an idle restart.
 
 ## Phase dictionary and allowed next steps
 
 Normal path: **Mapped → IdentityPrepared → Copying → Staged → Importing → Imported → Provisioning → Provisioned → Validated → Cleaned**. Submission/capture states are recorded for crash recovery, not invitations to repeat a write.
 
-Every row action also requires a connection, idle worker, appropriate Use selection and successful post-load Refresh. Major actions need renewed stage approval. This table describes intent; live identity/ownership/permission checks can still reject an action.
+Cloud workflow row actions require a connection, idle worker, appropriate Use selection and successful post-load Refresh (Refresh itself releases that guard). Local Restore journal writes needs neither connection nor row selection. Major actions need renewed stage approval. This table describes intent; live identity/ownership/permission checks can still reject an action.
 
 | Phase | Meaning / permitted direction |
 |---|---|
@@ -429,10 +434,11 @@ Examples:
 | “Ready” but next button blocked | Approval may be expired/consumed or for another stage. Run the indicated explicit validation; attest first only if required. A dashboard count is not permission. |
 | Guest failures unchanged after fixing Windows | Before capture only: running VM → Assess guest → Attest → Validate. Validate alone reads saved evidence. Fully decrypt BitLocker; suspension/decrypting is insufficient. After capture, investigate recovery without restarting the source. |
 | Small copy says Success | Check **both OS VHD and VMGS** progress. Wait for **Staged**, which requires all copies plus export revocation. |
-| Graph says succeeded but row still Importing | Compare the latest response time, known import ID and user with Last error. Current code accepts the exact journaled UPN **or exact nonzero Entra user object ID** returned in `assignedUserPrincipalName`. Reload updated code at idle and Refresh the original plan; never reimport or manually set phase. Foreign/missing identities still block. |
+| Graph says succeeded but row still Importing | Compare the time/scope of your independently obtained service response with the recorded import ID and Last error. The application accepts the exact journaled UPN **or exact nonzero Entra user object ID** returned in `assignedUserPrincipalName`; foreign/missing identities still block. The in-app Graph pane contains summaries/errors, not raw successful responses. Refresh the original plan; never reimport or manually set phase. |
 | Import lookup unavailable after provisioning | Historical result may be retained; absence is not proof of failed import or correct restored data. Monitor the Cloud PC independently, inspect the actual endpoint/content, and preserve evidence. Do not clear the error by repeating import/license. |
 | Provisioning failed or unusually slow | Inspect current service status/error and request IDs. Threshold warnings (2h capture/provisioning, 6h import) are advisory, **not SLAs**. No automatic license removal/reprovision/source restart. |
 | Snapshot/setting conflict from an earlier run | Resume its original owning journal. New draft mappings do not restore ownership. Do not delete the setting/group/journal to bypass conflict checks. |
+| Earlier PC shown before licensing | Any currently returned PC, including deprovisioning, remains a conflict. A complete directory-verified empty lookup can clear obsolete pre-license observations without advancing the phase; failed reads are not absence. See [observation and identity rules](SECURITY-AND-RECOVERY.md#previous-cloud-pc-during-a-new-migration). |
 | No eligible group/SKU | Verify exact direct group membership/policy assignment, lack of inherited licenses, entitlements/capacity/seats and propagation. Group search and license refresh do not remediate assignments or purchase seats. |
 | Unknown import/license/purge outcome | Do not replay the mutation. Use the applicable verified reconciliation flow or manual service investigation; absent objects or a present SKU alone do not establish original request outcome/timing. |
 
@@ -452,7 +458,7 @@ Examples:
 
 **What actually changes:** the app PATCHes the existing Windows 365 **user-setting object** so `provisioningSourceType` changes from `snapshot` to `image`. It does not remove a property directly from an Entra user/group. The setting remains assigned to the group, and users receive it through membership:
 
-The request also carries forward its existing name, local-admin/reset flags and supported restore/disaster-recovery settings to satisfy Graph's required-field checks; these are not deliberately changed. The app reads the setting back and confirms `image` plus the original group assignment before reporting success. If already `image`, it verifies without another PATCH. A failed/unconfirmed read-back means **keep membership unchanged** and review the latest Graph response—not repeat migration stages. Older app versions that report `requiredFieldsNotProvided` on this button need to be closed when idle and relaunched with the updated code, then load the original journal and Refresh before trying again.
+The request also carries forward its existing name, local-admin/reset flags and supported restore/disaster-recovery settings to satisfy Graph's required-field checks; these are not deliberately changed. The app reads the setting back and confirms `image` plus the original group assignment before reporting success. If already `image`, it verifies without another PATCH. A failed/unconfirmed read-back means **keep membership unchanged**, inspect the recorded error and independently read the setting through Graph—not repeat migration stages. Successful response bodies are not retained in the in-app Graph pane. Use the [read-only image verification query](../README.md#verify-the-image-setting) when actual property/assignment values are needed.
 
 An image-mode setting is still an effective assigned user setting. During Prepare validation, a new plan can reuse it only when it is the **single compatible tool-created setting assigned directly and exclusively to the exact selected group**. Prepare records the existing ID/name in the new journal, PATCHes `image` to `snapshot`, and confirms the source plus assignment by fresh read-back. If it is already `snapshot`, Prepare verifies and reuses it without another PATCH.
 
@@ -468,8 +474,8 @@ If you forgot **Use images**, closed the app and deleted the journal, the leftov
 
 ## Administrator references
 
-- [Administrator start page](README.md): what the tool does and where to begin.
 - [Project README](../README.md): installation, supported scope, permissions and security limitations.
+- [Security and recovery](SECURITY-AND-RECOVERY.md): persistence, privacy, ownership and current API limitations.
 - [Microsoft migration guidance](https://learn.microsoft.com/en-us/windows-365/enterprise/migration-to-windows365): supported migration scenario and product requirements.
 - [Windows 365 requirements](https://learn.microsoft.com/en-us/windows-365/enterprise/requirements): licensing, identity and management prerequisites.
 
